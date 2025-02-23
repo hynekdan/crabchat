@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::Result as JsonResult;
+use serde_cbor::Result as CborResult;
 
 use std::collections::HashMap;
 use std::env;
@@ -15,16 +15,14 @@ enum MessageType {
 }
 
 impl MessageType {
-    fn serialize(&self) -> JsonResult<String> {
-        let serialized = serde_json::to_string(&self)?;
+    fn serialize(&self) -> CborResult<Vec<u8>> {
+        let serialized = serde_cbor::to_vec(&self)?;
 
         Ok(serialized)
     }
 
-    fn deserialize<S: AsRef<str>>(input: &S) -> JsonResult<Self> {
-        let string = input.as_ref();
-
-        serde_json::from_str(string)
+    fn deserialize(input: &[u8]) -> CborResult<Self> {
+        serde_cbor::from_slice(input.as_ref())
     }
 
     pub fn send_message(self, address: &str) -> Result<()> {
@@ -32,11 +30,11 @@ impl MessageType {
         let mut stream = TcpStream::connect(address)?;
 
         // Send the length of the serialized message (as 4-byte value).
-        let len = serialized.as_bytes().len() as u32;
+        let len = serialized.len() as u32;
         stream.write(&len.to_be_bytes())?;
 
         // Send the serialized message.
-        stream.write_all(serialized.as_bytes())?;
+        stream.write_all(&serialized)?;
 
         Ok(())
     }
@@ -49,10 +47,12 @@ impl MessageType {
         let mut buffer = vec![0u8; len];
         stream.read_exact(&mut buffer)?;
 
+        println!("Received {:#?}", buffer);
+
         let string = String::from_utf8(buffer)?;
 
-        // JsonResult -> anyhow::Result
-        Ok(Self::deserialize(&string)?)
+        // CborResult -> anyhow::Result
+        Ok(Self::deserialize(string.as_bytes())?)
     }
 }
 
