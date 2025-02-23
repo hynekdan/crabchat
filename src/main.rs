@@ -3,9 +3,12 @@ use serde::{Deserialize, Serialize};
 use serde_cbor::Result as CborResult;
 
 use std::collections::HashMap;
-use std::env;
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::{BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::Path;
+use std::str::FromStr;
+use std::{env, fs};
 
 #[derive(Serialize, Deserialize, Debug)]
 enum MessageType {
@@ -50,6 +53,54 @@ impl MessageType {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ParseMessageError;
+
+impl FromStr for MessageType {
+    type Err = ParseMessageError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            s if s.starts_with(".file ") => {
+                let path = Path::new(s.strip_prefix(".file ").unwrap_or_default());
+                let mut buf_read = BufReader::new(File::open(path).unwrap());
+                let mut content: Vec<u8> = Vec::new();
+                let mut buffer = [0u8; 1024];
+
+                loop {
+                    match buf_read.read(&mut buffer) {
+                        Ok(0) => break, // End of file
+                        Ok(n) => content.extend_from_slice(&buffer[..n]),
+                        Err(e) => return Err(ParseMessageError),
+                    }
+                }
+
+                Ok(MessageType::File {
+                    name: "dummy_name".to_string(),
+                    content: content,
+                })
+            }
+            s if s.starts_with(".image ") => {
+                let path = Path::new(s.strip_prefix(".image ").unwrap_or_default());
+                let mut buf_read = BufReader::new(File::open(path).unwrap());
+                let mut content: Vec<u8> = Vec::new();
+                let mut buffer = [0u8; 1024];
+
+                loop {
+                    match buf_read.read(&mut buffer) {
+                        Ok(0) => break, // End of file
+                        Ok(n) => content.extend_from_slice(&buffer[..n]),
+                        Err(e) => return Err(ParseMessageError),
+                    }
+                }
+
+                Ok(MessageType::Image(content))
+            }
+            s => Ok(MessageType::Text(s.to_string())),
+        }
+    }
+}
+
 fn listen_and_accept(address: &str) -> Result<()> {
     let listener = TcpListener::bind(address)?;
     println!("Server listening on {}", address);
@@ -58,21 +109,19 @@ fn listen_and_accept(address: &str) -> Result<()> {
 
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => {
-                match stream.peer_addr() {
-                    Ok(addr) => {
-                        println!("New connection from {}", addr);
-                        
-                        clients.insert(addr, stream.try_clone()?);
+            Ok(stream) => match stream.peer_addr() {
+                Ok(addr) => {
+                    println!("New connection from {}", addr);
 
-                        match MessageType::receive_message(stream) {
-                            Ok(message) => println!("Received message: {:?}", message),
-                            Err(e) => println!("Error receiving message: {}", e),
-                        }
+                    clients.insert(addr, stream.try_clone()?);
+
+                    match MessageType::receive_message(stream) {
+                        Ok(message) => println!("Received message: {:?}", message),
+                        Err(e) => println!("Error receiving message: {}", e),
                     }
-                    Err(e) => println!("Error getting peer address: {}", e),
                 }
-            }
+                Err(e) => println!("Error getting peer address: {}", e),
+            },
             Err(e) => println!("Error accepting connection: {}", e),
         }
     }
@@ -91,10 +140,21 @@ fn main() -> Result<()> {
             let mut buf = String::new();
             std::io::stdin().read_line(&mut buf)?;
 
-            let message = MessageType::Text(buf.trim().to_string());
-            message
-                .send_message("127.0.0.1:8080")
-                .context("Failed to send message to the server")?;
+            let trimmed_input = buf.trim();
+
+            if trimmed_input.starts_with(".quit") {
+                println!("Shutting down the client");
+                break;
+            }
+
+            let message = MessageType::from_str(trimmed_input);
+
+            match message {
+                Ok(msg) => msg
+                    .send_message("127.0.0.1:8080")
+                    .context("Failed to send message to the server")?,
+                Err(_) => println!("Can't parse message {}", buf),
+            }
         }
     }
 
