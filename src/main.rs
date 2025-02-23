@@ -16,13 +16,11 @@ enum MessageType {
 
 impl MessageType {
     fn serialize(&self) -> CborResult<Vec<u8>> {
-        let serialized = serde_cbor::to_vec(&self)?;
-
-        Ok(serialized)
+        serde_cbor::to_vec(&self)
     }
 
     fn deserialize(input: &[u8]) -> CborResult<Self> {
-        serde_cbor::from_slice(input.as_ref())
+        serde_cbor::from_slice(input)
     }
 
     pub fn send_message(self, address: &str) -> Result<()> {
@@ -31,10 +29,11 @@ impl MessageType {
 
         // Send the length of the serialized message (as 4-byte value).
         let len = serialized.len() as u32;
-        stream.write(&len.to_be_bytes())?;
+        stream.write_all(&len.to_be_bytes())?;
 
         // Send the serialized message.
         stream.write_all(&serialized)?;
+        stream.flush()?;
 
         Ok(())
     }
@@ -47,47 +46,35 @@ impl MessageType {
         let mut buffer = vec![0u8; len];
         stream.read_exact(&mut buffer)?;
 
-        println!("Received {:#?}", buffer);
-
-        let string = String::from_utf8(buffer)?;
-
-        // CborResult -> anyhow::Result
-        Ok(Self::deserialize(string.as_bytes())?)
+        Ok(Self::deserialize(&buffer)?)
     }
 }
 
 fn listen_and_accept(address: &str) -> Result<()> {
     let listener = TcpListener::bind(address)?;
+    println!("Server listening on {}", address);
 
     let mut clients: HashMap<SocketAddr, TcpStream> = HashMap::new();
 
     for stream in listener.incoming() {
-        let Ok(stream) = stream else {
-            continue;
-        };
-        let Ok(addr) = stream.peer_addr() else {
-            continue;
-        };
+        match stream {
+            Ok(stream) => {
+                match stream.peer_addr() {
+                    Ok(addr) => {
+                        println!("New connection from {}", addr);
+                        
+                        clients.insert(addr, stream.try_clone()?);
 
-        clients.insert(addr.clone(), stream);
-
-        let client = if let Some(client_ref) = clients.get(&addr) {
-            let clone = client_ref.try_clone();
-            match clone {
-                Err(_) => {
-                    println!("Stream of {addr} is no longer valid");
-                    clients.remove(&addr);
-                    continue;
+                        match MessageType::receive_message(stream) {
+                            Ok(message) => println!("Received message: {:?}", message),
+                            Err(e) => println!("Error receiving message: {}", e),
+                        }
+                    }
+                    Err(e) => println!("Error getting peer address: {}", e),
                 }
-                Ok(cloned) => cloned,
             }
-        } else {
-            unreachable!("The unlikely to happen has happened")
-        };
-
-        let message = MessageType::receive_message(client);
-        // Here, you can further process this message as per your requirements
-        println!("{:?}", message);
+            Err(e) => println!("Error accepting connection: {}", e),
+        }
     }
 
     Ok(())
@@ -99,12 +86,13 @@ fn main() -> Result<()> {
     if mode_or_message == "server" {
         listen_and_accept("127.0.0.1:8080").context("Failed to run server")?;
     } else {
+        println!("Client mode: Type messages to send (Ctrl+C to exit)");
         loop {
             let mut buf = String::new();
             std::io::stdin().read_line(&mut buf)?;
 
-            let new_message = MessageType::Text(buf.trim().to_string());
-            new_message
+            let message = MessageType::Text(buf.trim().to_string());
+            message
                 .send_message("127.0.0.1:8080")
                 .context("Failed to send message to the server")?;
         }
