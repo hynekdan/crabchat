@@ -32,56 +32,12 @@ impl MessageType {
     pub fn send_message(self, address: &str) -> Result<()> {
         let serialized = self.serialize()?;
         let mut stream = TcpStream::connect(address)?;
-
-        // Send the length of the serialized message (as 4-byte value).
-        let len = serialized.len() as u32;
-        stream.write_all(&len.to_be_bytes())?;
-
-        // Send the serialized message.
-        stream.write_all(&serialized)?;
-        stream.flush()?;
-
+        send_serialized_message(&mut stream, &serialized)?;
         Ok(())
     }
 
     pub fn receive_message(mut stream: TcpStream) -> Result<Self> {
-        let mut len_bytes = [0u8; 4];
-
-        // Read the message length with more robust handling
-        // TODO consider rewritting using is_error or similar
-        match stream.read_exact(&mut len_bytes) {
-            Ok(_) => {}
-            Err(e) => {
-                return Err(anyhow::anyhow!("Failed to read message length: {}", e));
-            }
-        }
-
-        let len = u32::from_be_bytes(len_bytes) as usize;
-
-        // Sanity check the length to avoid allocating too much memory
-        if len > 100_000_000 {
-            // 100MB limit
-            return Err(anyhow::anyhow!("Message too large: {} bytes", len));
-        }
-
-        let mut buffer = vec![0u8; len];
-
-        // Read the full message with better error handling
-        let mut bytes_read = 0;
-        while bytes_read < len {
-            match stream.read(&mut buffer[bytes_read..]) {
-                Ok(0) => {
-                    return Err(anyhow::anyhow!(
-                        "Connection closed before reading full message"
-                    ));
-                }
-                Ok(n) => bytes_read += n,
-                Err(e) => {
-                    return Err(anyhow::anyhow!("Failed to read message data: {}", e));
-                }
-            }
-        }
-
+        let buffer = read_message_from_stream(&mut stream)?;
         match Self::deserialize(&buffer) {
             Ok(message) => Ok(message),
             Err(e) => Err(anyhow::anyhow!("Failed to deserialize message: {}", e)),
@@ -93,30 +49,113 @@ impl MessageType {
             MessageType::Text(text) => {
                 println!("Received: {}", text);
             }
-            // TODO merge image and file handling
             MessageType::Image(data) => {
-                println!("Receiving image...");
-                fs::create_dir("images")?;
-
-                let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-
-                let path = format!("images/{}.png", timestamp);
-                let mut file = File::create(&path)?;
-                file.write_all(data)?;
-                println!("Image saved to {}", path);
+                save_binary_content("images", None, data)?;
             }
             MessageType::File { name, content } => {
-                println!("Receiving file: {}", name);
-                fs::create_dir("files")?;
-
-                let path = format!("files/{}", name);
-                let mut file = File::create(&path)?;
-                file.write_all(content)?;
-                println!("File saved to {}", path);
+                save_binary_content("files", Some(name), content)?;
             }
         }
         Ok(())
     }
+}
+
+fn save_binary_content(dir: &str, filename: Option<&str>, data: &[u8]) -> Result<()> {
+    fs::create_dir_all(dir)?;
+
+    let path = match filename {
+        Some(name) => format!("{}/{}", dir, name),
+        None => {
+            let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+            format!("{}/{}.png", dir, timestamp)
+        }
+    };
+
+    println!(
+        "Receiving {}: {}",
+        if filename.is_some() { "file" } else { "image" },
+        path
+    );
+    let mut file = File::create(&path)?;
+    file.write_all(data)?;
+    println!("Saved to {}", path);
+
+    Ok(())
+}
+
+fn read_message_from_stream(stream: &mut TcpStream) -> Result<Vec<u8>> {
+    let mut len_bytes = [0u8; 4];
+
+    // Read the message length
+    // TODO consider rewritting using is_error or similar
+    match stream.read_exact(&mut len_bytes) {
+        Ok(_) => {}
+        Err(e) => {
+            return Err(anyhow::anyhow!("Failed to read message length: {}", e));
+        }
+    }
+
+    let len = u32::from_be_bytes(len_bytes) as usize;
+
+    // Sanity check the length to avoid allocating too much memory
+    if len > 100_000_000 {
+        // 100MB limit
+        return Err(anyhow::anyhow!("Message too large: {} bytes", len));
+    }
+
+    let mut buffer = vec![0u8; len];
+
+    // Read the full message with better error handling
+    let mut bytes_read = 0;
+    while bytes_read < len {
+        match stream.read(&mut buffer[bytes_read..]) {
+            Ok(0) => {
+                return Err(anyhow::anyhow!(
+                    "Connection closed before reading full message"
+                ));
+            }
+            Ok(n) => bytes_read += n,
+            Err(e) => {
+                return Err(anyhow::anyhow!("Failed to read message data: {}", e));
+            }
+        }
+    }
+
+    Ok(buffer)
+}
+
+fn send_serialized_message(stream: &mut TcpStream, serialized: &[u8]) -> Result<()> {
+    // Send the length of the serialized message (as 4-byte value).
+    let len = serialized.len() as u32;
+    stream.write_all(&len.to_be_bytes())?;
+
+    // Send the serialized message.
+    stream.write_all(serialized)?;
+    stream.flush()?;
+
+    Ok(())
+}
+
+fn read_file_to_vec(path: &Path) -> Result<Vec<u8>> {
+    let file =
+        File::open(path).with_context(|| format!("Failed to open file: {}", path.display()))?;
+
+    let mut buf_read = BufReader::new(file);
+    let mut content = Vec::new();
+
+    buf_read
+        .read_to_end(&mut content)
+        .with_context(|| format!("Failed to read file: {}", path.display()))?;
+
+    Ok(content)
+}
+
+fn get_filename_as_string(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or_default()
+        .to_str()
+        .unwrap_or_default()
+        .to_string()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -132,49 +171,39 @@ impl FromStr for MessageType {
                 let path_str = s.strip_prefix(".file ").unwrap_or_default();
                 let path = Path::new(path_str);
 
-                let file = match File::open(path) {
-                    Ok(f) => f,
-                    Err(_) => return Err(ParseMessageError),
-                };
+                let content = read_file_to_vec(path).map_err(|_| ParseMessageError)?;
+                let name = get_filename_as_string(path);
 
-                let mut buf_read = BufReader::new(file);
-                let mut content: Vec<u8> = Vec::new();
-
-                if buf_read.read_to_end(&mut content).is_err() {
-                    return Err(ParseMessageError);
-                }
-
-                // using unwrap as I already read the file
-                let file_name = path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_str()
-                    .unwrap_or_default();
-
-                Ok(MessageType::File {
-                    name: file_name.to_string(),
-                    content,
-                })
+                Ok(MessageType::File { name, content })
             }
             s if s.starts_with(".image ") => {
                 let path_str = s.strip_prefix(".image ").unwrap_or_default();
                 let path = Path::new(path_str);
 
-                let file = match File::open(path) {
-                    Ok(f) => f,
-                    Err(_) => return Err(ParseMessageError),
-                };
-
-                let mut buf_read = BufReader::new(file);
-                let mut content: Vec<u8> = Vec::new();
-
-                if buf_read.read_to_end(&mut content).is_err() {
-                    return Err(ParseMessageError);
-                }
+                let content = read_file_to_vec(path).map_err(|_| ParseMessageError)?;
 
                 Ok(MessageType::Image(content))
             }
             s => Ok(MessageType::Text(s.to_string())),
+        }
+    }
+}
+
+fn forward_message_to_clients(
+    message: &MessageType,
+    sender_addr: SocketAddr,
+    clients: &HashMap<SocketAddr, TcpStream>,
+) {
+    if let Ok(serialized) = message.serialize() {
+        for (&addr, client_stream) in clients.iter() {
+            if addr != sender_addr {
+                println!("Forwarding to {}", addr);
+                if let Ok(mut stream) = client_stream.try_clone() {
+                    if let Err(e) = send_serialized_message(&mut stream, &serialized) {
+                        println!("Error sending message to {}: {}", addr, e);
+                    }
+                }
+            }
         }
     }
 }
@@ -255,31 +284,7 @@ fn handle_client(
 
                 // Forward to all other clients
                 let client_map = clients.lock().unwrap();
-                for (&addr, client_stream) in client_map.iter() {
-                    if addr != client_addr {
-                        println!("Forwarding to {}", addr);
-                        if let Ok(mut stream) = client_stream.try_clone() {
-                            // Send message length
-                            if let Ok(serialized) = message.serialize() {
-                                let len = serialized.len() as u32;
-                                if let Err(e) = stream.write_all(&len.to_be_bytes()) {
-                                    println!("Error sending message length to {}: {}", addr, e);
-                                    continue;
-                                }
-
-                                // Send the serialized message
-                                if let Err(e) = stream.write_all(&serialized) {
-                                    println!("Error sending message data to {}: {}", addr, e);
-                                    continue;
-                                }
-
-                                if let Err(e) = stream.flush() {
-                                    println!("Error flushing stream to {}: {}", addr, e);
-                                }
-                            }
-                        }
-                    }
-                }
+                forward_message_to_clients(&message, client_addr, &client_map);
                 println!("Forward finished");
             }
             Err(e) => {
@@ -316,9 +321,9 @@ fn run_client(hostname: &str, port: u16) -> Result<()> {
                 // Register with server
                 let register_msg = MessageType::Text(format!("REGISTER:{}", local_addr));
                 if let Ok(serialized) = register_msg.serialize() {
-                    let len = serialized.len() as u32;
-                    let _ = server.write_all(&len.to_be_bytes());
-                    let _ = server.write_all(&serialized);
+                    if let Err(e) = send_serialized_message(&mut server, &serialized) {
+                        println!("Failed to register with server: {}", e);
+                    }
                 }
 
                 // Listen for incoming messages
