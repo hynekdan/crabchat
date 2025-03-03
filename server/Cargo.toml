@@ -1,0 +1,10 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+utils = { version = "0.1.0", path = "../utils" }
+serde = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
