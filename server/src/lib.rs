@@ -4,6 +4,7 @@ use std::fs;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use tracing::{info, warn, error, debug, trace};
 
 use utils::{MessageType, send_serialized_message};
 
@@ -15,12 +16,15 @@ fn forward_message_to_clients(
     if let Ok(serialized) = message.serialize() {
         // Collect clients to remove if they're disconnected
         let mut to_remove = Vec::new();
+        let client_count = clients.len() - 1; // Exclude sender
+        
+        debug!("Forwarding message from {} to {} clients", sender_addr, client_count);
 
         for (&addr, client_stream) in clients.iter_mut() {
             if addr != sender_addr {
-                println!("Forwarding to {}", addr);
+                debug!("Forwarding to {}", addr);
                 if let Err(e) = send_serialized_message(client_stream, &serialized) {
-                    println!("Error sending message to {}: {}", addr, e);
+                    error!("Error sending message to {}: {}", addr, e);
                     to_remove.push(addr);
                 }
             }
@@ -29,8 +33,10 @@ fn forward_message_to_clients(
         // Remove disconnected clients
         for addr in to_remove {
             clients.remove(&addr);
-            println!("Removed disconnected client: {}", addr);
+            info!("Removed disconnected client: {}", addr);
         }
+    } else {
+        error!("Failed to serialize message for forwarding");
     }
 }
 
@@ -39,13 +45,17 @@ fn handle_client(
     client_addr: SocketAddr,
     clients: Arc<Mutex<HashMap<SocketAddr, TcpStream>>>,
 ) {
+    info!("Starting handler for client: {}", client_addr);
+    
     // Send welcome message to confirm connection
     let welcome_msg = MessageType::Text(format!(
         "Welcome to the chat server! Your address is {}",
         client_addr
     ));
+    
+    debug!("Sending welcome message to {}", client_addr);
     if let Err(e) = welcome_msg.send_message(&mut stream) {
-        println!("Failed to send welcome message to {}: {}", client_addr, e);
+        error!("Failed to send welcome message to {}: {}", client_addr, e);
         // Remove client if we couldn't send a welcome message
         clients.lock().unwrap().remove(&client_addr);
         return;
@@ -56,87 +66,114 @@ fn handle_client(
         let mut stream_clone = match stream.try_clone() {
             Ok(s) => s,
             Err(e) => {
-                println!("Error cloning stream for {}: {}", client_addr, e);
+                error!("Error cloning stream for {}: {}", client_addr, e);
                 break;
             }
         };
 
+        trace!("Waiting for message from client {}", client_addr);
         match MessageType::receive_message(&mut stream_clone) {
             Ok(message) => {
                 // Log the received message but don't save them
                 match &message {
-                    MessageType::Text(text) => println!("Received from {}: {}", client_addr, text),
-                    MessageType::Image(_) => println!("Received image from {}", client_addr),
-                    MessageType::File { name, .. } => {
-                        println!("Received file '{}' from {}", name, client_addr)
+                    MessageType::Text(text) => info!("Received from {}: {}", client_addr, text),
+                    MessageType::Image(data) => info!("Received image ({} bytes) from {}", data.len(), client_addr),
+                    MessageType::File { name, content } => {
+                        info!("Received file '{}' ({} bytes) from {}", name, content.len(), client_addr)
                     }
                 }
 
                 // Forward to all other clients
-                let mut client_map = clients.lock().unwrap();
+                let mut client_map = match clients.lock() {
+                    Ok(guard) => guard,
+                    Err(e) => {
+                        error!("Failed to acquire lock on clients map: {}", e);
+                        continue;
+                    }
+                };
+                
                 forward_message_to_clients(&message, client_addr, &mut client_map);
             }
             Err(e) => {
-                println!("Error receiving from {}: {}", client_addr, e);
+                warn!("Error receiving from {}: {}", client_addr, e);
                 break;
             }
         }
     }
 
     // Remove client when disconnected
-    let mut clients_map = clients.lock().unwrap();
-    clients_map.remove(&client_addr);
-    println!("Client {} disconnected", client_addr);
+    match clients.lock() {
+        Ok(mut clients_map) => {
+            clients_map.remove(&client_addr);
+            info!("Client {} disconnected", client_addr);
+        }
+        Err(e) => error!("Failed to acquire lock to remove client {}: {}", client_addr, e),
+    }
 }
 
 pub fn listen_and_accept(hostname: &str, port: u16) -> Result<()> {
     let address = format!("{}:{}", hostname, port);
+    info!("Starting server on {}", address);
+    
     let listener = TcpListener::bind(&address)?;
-    println!("Server listening on {}", address);
+    info!("Server listening on {}", address);
 
     // Use Arc<Mutex<HashMap>> to safely share clients between threads
     let clients: Arc<Mutex<HashMap<SocketAddr, TcpStream>>> = Arc::new(Mutex::new(HashMap::new()));
 
     // Create directories for received files
+    debug!("Creating directories for received content");
     fs::create_dir_all("images")?;
     fs::create_dir_all("files")?;
 
+    info!("Server ready to accept connections");
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => match stream.peer_addr() {
                 Ok(addr) => {
-                    println!("New connection from {}", addr);
+                    info!("New connection from {}", addr);
 
                     // Configure the stream
                     if let Err(e) = stream.set_nodelay(true) {
-                        println!("Warning: Failed to set TCP_NODELAY: {}", e);
+                        warn!("Failed to set TCP_NODELAY for {}: {}", addr, e);
                     }
 
                     // Clone for the thread
                     let stream_clone = match stream.try_clone() {
                         Ok(s) => s,
                         Err(e) => {
-                            println!("Error cloning stream: {}", e);
+                            error!("Error cloning stream for {}: {}", addr, e);
                             continue;
                         }
                     };
 
                     // Store client connection
-                    clients.lock().unwrap().insert(addr, stream_clone);
+                    match clients.lock() {
+                        Ok(mut map) => {
+                            map.insert(addr, stream_clone);
+                            debug!("Added client {} to active connections map", addr);
+                        }
+                        Err(e) => {
+                            error!("Failed to acquire lock to add client {}: {}", addr, e);
+                            continue;
+                        }
+                    }
 
                     // Clone Arc for the thread
                     let clients_clone = Arc::clone(&clients);
 
                     // Handle this client in a separate thread
+                    debug!("Spawning handler thread for client {}", addr);
                     thread::spawn(move || {
                         handle_client(stream, addr, clients_clone);
                     });
                 }
-                Err(e) => println!("Error getting peer address: {}", e),
+                Err(e) => error!("Error getting peer address: {}", e),
             },
-            Err(e) => println!("Error accepting connection: {}", e),
+            Err(e) => error!("Error accepting connection: {}", e),
         }
     }
 
+    warn!("Server listener loop exited");
     Ok(())
 }

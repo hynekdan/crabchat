@@ -8,3 +8,5 @@ utils = { version = "0.1.0", path = "../utils" }
 serde = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
