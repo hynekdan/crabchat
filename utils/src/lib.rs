@@ -64,20 +64,22 @@ impl MessageType {
         debug!("Receiving message from stream");
         let buffer = read_message_from_stream(stream)?;
         debug!("Received raw data: {} bytes", buffer.len());
-        
+
         match Self::deserialize(&buffer) {
             Ok(message) => {
                 match &message {
                     MessageType::Text(text) => debug!("Deserialized text message: {}", text),
                     MessageType::Image(data) => debug!("Deserialized image: {} bytes", data.len()),
-                    MessageType::File { name, content } => debug!("Deserialized file '{}': {} bytes", name, content.len()),
+                    MessageType::File { name, content } => {
+                        debug!("Deserialized file '{}': {} bytes", name, content.len())
+                    }
                 }
                 Ok(message)
-            },
+            }
             Err(e) => {
                 error!("Deserialization failed: {}", e);
                 Err(anyhow::anyhow!("Failed to deserialize message: {}", e))
-            },
+            }
         }
     }
 
@@ -116,13 +118,15 @@ fn save_binary_content(dir: &str, filename: Option<&str>, data: &[u8]) -> Result
         if filename.is_some() { "file" } else { "image" },
         path
     );
-    
+
     debug!("Creating file: {}", path);
-    let mut file = File::create(&path).with_context(|| format!("Failed to create file: {}", path))?;
-    
+    let mut file =
+        File::create(&path).with_context(|| format!("Failed to create file: {}", path))?;
+
     debug!("Writing {} bytes to file", data.len());
-    file.write_all(data).with_context(|| format!("Failed to write data to: {}", path))?;
-    
+    file.write_all(data)
+        .with_context(|| format!("Failed to write data to: {}", path))?;
+
     info!("Successfully saved {} bytes to {}", data.len(), path);
 
     Ok(())
@@ -172,7 +176,10 @@ fn read_message_from_stream(stream: &mut TcpStream) -> Result<Vec<u8>> {
         trace!("Reading data chunk at offset {}/{}", bytes_read, len);
         match stream.read(&mut buffer[bytes_read..]) {
             Ok(0) => {
-                error!("Connection closed after reading {} of {} bytes", bytes_read, len);
+                error!(
+                    "Connection closed after reading {} of {} bytes",
+                    bytes_read, len
+                );
                 return Err(anyhow::anyhow!(
                     "Connection closed before reading full message"
                 ));
@@ -196,18 +203,19 @@ pub fn send_serialized_message(stream: &mut TcpStream, serialized: &[u8]) -> Res
     // Send the length of the serialized message (as 4-byte value).
     let len = serialized.len() as u32;
     debug!("Sending message length: {} bytes", len);
-    
-    stream.write_all(&len.to_be_bytes())
+
+    stream
+        .write_all(&len.to_be_bytes())
         .with_context(|| "Failed to send message length")?;
 
     // Send the serialized message.
     debug!("Sending message payload");
-    stream.write_all(serialized)
+    stream
+        .write_all(serialized)
         .with_context(|| "Failed to send message payload")?;
-    
+
     debug!("Flushing stream");
-    stream.flush()
-        .with_context(|| "Failed to flush stream")?;
+    stream.flush().with_context(|| "Failed to flush stream")?;
 
     debug!("Successfully sent message of {} bytes", len);
     Ok(())
@@ -215,29 +223,39 @@ pub fn send_serialized_message(stream: &mut TcpStream, serialized: &[u8]) -> Res
 
 fn read_file_to_vec(path: &Path) -> Result<Vec<u8>> {
     debug!("Reading file: {}", path.display());
-    
-    let file = File::open(path)
-        .with_context(|| format!("Failed to open file: {}", path.display()))?;
+
+    let file =
+        File::open(path).with_context(|| format!("Failed to open file: {}", path.display()))?;
 
     let mut buf_read = BufReader::new(file);
     let mut content = Vec::new();
 
     debug!("Reading file content");
-    buf_read.read_to_end(&mut content)
+    buf_read
+        .read_to_end(&mut content)
         .with_context(|| format!("Failed to read file: {}", path.display()))?;
-    
-    debug!("Successfully read {} bytes from {}", content.len(), path.display());
+
+    debug!(
+        "Successfully read {} bytes from {}",
+        content.len(),
+        path.display()
+    );
     Ok(content)
 }
 
 fn get_filename_as_string(path: &Path) -> String {
-    let filename = path.file_name()
+    let filename = path
+        .file_name()
         .unwrap_or_default()
         .to_str()
         .unwrap_or_default()
         .to_string();
-    
-    debug!("Extracted filename '{}' from path: {}", filename, path.display());
+
+    debug!(
+        "Extracted filename '{}' from path: {}",
+        filename,
+        path.display()
+    );
     filename
 }
 
@@ -257,9 +275,13 @@ impl FromStr for MessageType {
                 match read_file_to_vec(path) {
                     Ok(content) => {
                         let name = get_filename_as_string(path);
-                        debug!("Created file message with name: '{}', size: {} bytes", name, content.len());
+                        debug!(
+                            "Created file message with name: '{}', size: {} bytes",
+                            name,
+                            content.len()
+                        );
                         Ok(MessageType::File { name, content })
-                    },
+                    }
                     Err(e) => {
                         error!("Failed to read file {}: {}", path.display(), e);
                         Err(ParseMessageError)
@@ -275,7 +297,7 @@ impl FromStr for MessageType {
                     Ok(content) => {
                         debug!("Created image message with size: {} bytes", content.len());
                         Ok(MessageType::Image(content))
-                    },
+                    }
                     Err(e) => {
                         error!("Failed to read image {}: {}", path.display(), e);
                         Err(ParseMessageError)
@@ -295,6 +317,6 @@ impl FromStr for MessageType {
 mod tests {
     use super::*;
 
-#[test]
+    #[test]
     fn it_works() {}
 }

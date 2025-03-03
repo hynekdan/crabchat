@@ -3,7 +3,7 @@ use std::io;
 use std::net::TcpStream;
 use std::str::FromStr;
 use std::thread;
-use tracing::{info, warn, error, debug};
+use tracing::{debug, error, info, warn};
 
 use utils::MessageType;
 
@@ -29,7 +29,8 @@ pub fn run_client(hostname: &str, port: u16) -> Result<()> {
     info!("Connected to server!");
 
     // Clone the stream for the receiver thread
-    let mut receiver_stream = server_stream.try_clone()
+    let mut receiver_stream = server_stream
+        .try_clone()
         .context("Failed to clone TCP stream for receiver thread")?;
 
     // Start a thread to receive messages

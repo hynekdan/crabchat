@@ -4,7 +4,7 @@ use std::fs;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use tracing::{info, warn, error, debug, trace};
+use tracing::{debug, error, info, trace, warn};
 
 use utils::{MessageType, send_serialized_message};
 
@@ -17,8 +17,11 @@ fn forward_message_to_clients(
         // Collect clients to remove if they're disconnected
         let mut to_remove = Vec::new();
         let client_count = clients.len() - 1; // Exclude sender
-        
-        debug!("Forwarding message from {} to {} clients", sender_addr, client_count);
+
+        debug!(
+            "Forwarding message from {} to {} clients",
+            sender_addr, client_count
+        );
 
         for (&addr, client_stream) in clients.iter_mut() {
             if addr != sender_addr {
@@ -46,13 +49,13 @@ fn handle_client(
     clients: Arc<Mutex<HashMap<SocketAddr, TcpStream>>>,
 ) {
     info!("Starting handler for client: {}", client_addr);
-    
+
     // Send welcome message to confirm connection
     let welcome_msg = MessageType::Text(format!(
         "Welcome to the chat server! Your address is {}",
         client_addr
     ));
-    
+
     debug!("Sending welcome message to {}", client_addr);
     if let Err(e) = welcome_msg.send_message(&mut stream) {
         error!("Failed to send welcome message to {}: {}", client_addr, e);
@@ -77,9 +80,16 @@ fn handle_client(
                 // Log the received message but don't save them
                 match &message {
                     MessageType::Text(text) => info!("Received from {}: {}", client_addr, text),
-                    MessageType::Image(data) => info!("Received image ({} bytes) from {}", data.len(), client_addr),
+                    MessageType::Image(data) => {
+                        info!("Received image ({} bytes) from {}", data.len(), client_addr)
+                    }
                     MessageType::File { name, content } => {
-                        info!("Received file '{}' ({} bytes) from {}", name, content.len(), client_addr)
+                        info!(
+                            "Received file '{}' ({} bytes) from {}",
+                            name,
+                            content.len(),
+                            client_addr
+                        )
                     }
                 }
 
@@ -91,7 +101,7 @@ fn handle_client(
                         continue;
                     }
                 };
-                
+
                 forward_message_to_clients(&message, client_addr, &mut client_map);
             }
             Err(e) => {
@@ -107,14 +117,17 @@ fn handle_client(
             clients_map.remove(&client_addr);
             info!("Client {} disconnected", client_addr);
         }
-        Err(e) => error!("Failed to acquire lock to remove client {}: {}", client_addr, e),
+        Err(e) => error!(
+            "Failed to acquire lock to remove client {}: {}",
+            client_addr, e
+        ),
     }
 }
 
 pub fn listen_and_accept(hostname: &str, port: u16) -> Result<()> {
     let address = format!("{}:{}", hostname, port);
     info!("Starting server on {}", address);
-    
+
     let listener = TcpListener::bind(&address)?;
     info!("Server listening on {}", address);
 
