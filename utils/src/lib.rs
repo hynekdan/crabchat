@@ -13,7 +13,7 @@ use std::{fs, io};
 use tracing::{debug, error, info, trace, warn};
 
 #[derive(Parser)]
-#[command(author, version, about, long_about = None)]
+#[command(author="hynekdan", version, about="CrabChat", long_about = "A lightweight messaging application built in Rust supporting text, files, and images.")]
 pub struct Cli {
     // using H instead of h to avoid conflict with standard -h for help
     #[arg(short = 'H', long, default_value = "localhost")]
