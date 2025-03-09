@@ -1,46 +1,49 @@
-use anyhow::Result;
+use anyhow::{Context, Result as AnyhowResult};
 use std::collections::HashMap;
 use std::fs;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tracing::{debug, error, info, trace, warn};
+use utils::errors::{ChatError, ChatResult};
 
-use utils::{MessageType, send_serialized_message};
+use utils::{MessageType, error_codes, send_serialized_message};
 
 fn forward_message_to_clients(
     message: &MessageType,
     sender_addr: SocketAddr,
     clients: &mut HashMap<SocketAddr, TcpStream>,
-) {
-    if let Ok(serialized) = message.serialize() {
-        // Collect clients to remove if they're disconnected
-        let mut to_remove = Vec::new();
-        let client_count = clients.len() - 1; // Exclude sender
+) -> ChatResult<()> {
+    let serialized = message.serialize().map_err(|e| {
+        ChatError::SerializationError(format!("Failed to serialize message for forwarding: {}", e))
+    })?;
 
-        debug!(
-            "Forwarding message from {} to {} clients",
-            sender_addr, client_count
-        );
+    // Collect clients to remove if they're disconnected
+    let mut to_remove = Vec::new();
+    let client_count = clients.len() - 1; // Exclude sender
 
-        for (&addr, client_stream) in clients.iter_mut() {
-            if addr != sender_addr {
-                debug!("Forwarding to {}", addr);
-                if let Err(e) = send_serialized_message(client_stream, &serialized) {
-                    error!("Error sending message to {}: {}", addr, e);
-                    to_remove.push(addr);
-                }
+    debug!(
+        "Forwarding message from {} to {} clients",
+        sender_addr, client_count
+    );
+
+    for (&addr, client_stream) in clients.iter_mut() {
+        if addr != sender_addr {
+            debug!("Forwarding to {}", addr);
+            if let Err(e) = send_serialized_message(client_stream, &serialized) {
+                error!("Error sending message to {}: {}", addr, e);
+                to_remove.push(addr);
             }
         }
-
-        // Remove disconnected clients
-        for addr in to_remove {
-            clients.remove(&addr);
-            info!("Removed disconnected client: {}", addr);
-        }
-    } else {
-        error!("Failed to serialize message for forwarding");
     }
+
+    // Remove disconnected clients
+    for addr in to_remove {
+        clients.remove(&addr);
+        info!("Removed disconnected client: {}", addr);
+    }
+
+    Ok(())
 }
 
 fn handle_client(
@@ -60,7 +63,9 @@ fn handle_client(
     if let Err(e) = welcome_msg.send_message(&mut stream) {
         error!("Failed to send welcome message to {}: {}", client_addr, e);
         // Remove client if we couldn't send a welcome message
-        clients.lock().unwrap().remove(&client_addr);
+        if let Ok(mut clients_map) = clients.lock() {
+            clients_map.remove(&client_addr);
+        }
         return;
     }
 
@@ -70,6 +75,12 @@ fn handle_client(
             Ok(s) => s,
             Err(e) => {
                 error!("Error cloning stream for {}: {}", client_addr, e);
+                // Send error to client before breaking
+                let _ = MessageType::create_error(
+                    error_codes::SERVER_ERROR,
+                    "Internal server error: Failed to process your connection",
+                )
+                .send_message(&mut stream);
                 break;
             }
         };
@@ -91,22 +102,72 @@ fn handle_client(
                             client_addr
                         )
                     }
+                    MessageType::Error { code, message } => {
+                        info!(
+                            "Received error from {}: code={}, message={}",
+                            client_addr, code, message
+                        )
+                    }
                 }
 
                 // Forward to all other clients
-                let mut client_map = match clients.lock() {
-                    Ok(guard) => guard,
+                let client_map_result = clients.lock();
+                match client_map_result {
+                    Ok(mut client_map) => {
+                        if let Err(e) =
+                            forward_message_to_clients(&message, client_addr, &mut client_map)
+                        {
+                            error!("Failed to forward message from {}: {}", client_addr, e);
+                            // Send error back to the sender
+                            let _ = MessageType::create_error(
+                                error_codes::SERVER_ERROR,
+                                &format!("Failed to forward your message: {}", e),
+                            )
+                            .send_message(&mut stream);
+                        }
+                    }
                     Err(e) => {
                         error!("Failed to acquire lock on clients map: {}", e);
+                        let _ = MessageType::create_error(
+                            error_codes::SERVER_ERROR,
+                            "Internal server error: Failed to process your message",
+                        )
+                        .send_message(&mut stream);
                         continue;
                     }
-                };
-
-                forward_message_to_clients(&message, client_addr, &mut client_map);
+                }
             }
             Err(e) => {
                 warn!("Error receiving from {}: {}", client_addr, e);
-                break;
+
+                // For some errors, don't break the connection
+                match &e {
+                    ChatError::EmptyMessage => {
+                        let _ = MessageType::create_error(
+                            error_codes::MESSAGE_ERROR,
+                            "Empty message received",
+                        )
+                        .send_message(&mut stream);
+                        continue;
+                    }
+                    ChatError::MessageTooLarge(size) => {
+                        let _ = MessageType::create_error(
+                            error_codes::MESSAGE_ERROR,
+                            &format!("Message too large: {} bytes (max: 100MB)", size),
+                        )
+                        .send_message(&mut stream);
+                        continue;
+                    }
+                    ChatError::SerializationError(msg) => {
+                        let _ = MessageType::create_error(
+                            error_codes::PROTOCOL_ERROR,
+                            &format!("Invalid message format: {}", msg),
+                        )
+                        .send_message(&mut stream);
+                        continue;
+                    }
+                    _ => break, // For connection errors, break the loop
+                }
             }
         }
     }
@@ -124,11 +185,13 @@ fn handle_client(
     }
 }
 
-pub fn listen_and_accept(hostname: &str, port: u16) -> Result<()> {
+pub fn listen_and_accept(hostname: &str, port: u16) -> AnyhowResult<()> {
     let address = format!("{}:{}", hostname, port);
     info!("Starting server on {}", address);
 
-    let listener = TcpListener::bind(&address)?;
+    let listener =
+        TcpListener::bind(&address).with_context(|| format!("Failed to bind to {}", address))?;
+
     info!("Server listening on {}", address);
 
     // Use Arc<Mutex<HashMap>> to safely share clients between threads
@@ -136,8 +199,9 @@ pub fn listen_and_accept(hostname: &str, port: u16) -> Result<()> {
 
     // Create directories for received files
     debug!("Creating directories for received content");
-    fs::create_dir_all("images")?;
-    fs::create_dir_all("files")?;
+    fs::create_dir_all("images").with_context(|| "Failed to create 'images' directory")?;
+
+    fs::create_dir_all("files").with_context(|| "Failed to create 'files' directory")?;
 
     info!("Server ready to accept connections");
     for stream in listener.incoming() {

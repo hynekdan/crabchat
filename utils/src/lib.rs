@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result as AnyhowResult};
 use serde::{Deserialize, Serialize};
 use serde_cbor::Result as CborResult;
 
@@ -11,6 +11,9 @@ use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs, io};
 use tracing::{debug, error, info, trace, warn};
+
+pub mod errors;
+pub use errors::{ChatError, ChatResult};
 
 #[derive(Parser)]
 #[command(
@@ -33,6 +36,8 @@ pub enum MessageType {
     Text(String),
     Image(Vec<u8>),
     File { name: String, content: Vec<u8> },
+    // message type for server->client error reporting
+    Error { code: u32, message: String },
 }
 
 impl MessageType {
@@ -56,16 +61,21 @@ impl MessageType {
         result
     }
 
-    pub fn send_message(self, stream: &mut TcpStream) -> Result<()> {
+    pub fn send_message(self, stream: &mut TcpStream) -> AnyhowResult<()> {
         debug!("Preparing to send message");
-        let serialized = self.serialize()?;
+        let serialized = self
+            .serialize()
+            .with_context(|| "Failed to serialize message for sending")?;
+
         debug!("Serialized message size: {} bytes", serialized.len());
-        send_serialized_message(stream, &serialized)?;
+        send_serialized_message(stream, &serialized)
+            .with_context(|| "Failed to send message to stream")?;
+
         debug!("Message sent successfully");
         Ok(())
     }
 
-    pub fn receive_message(stream: &mut TcpStream) -> Result<Self> {
+    pub fn receive_message(stream: &mut TcpStream) -> ChatResult<Self> {
         debug!("Receiving message from stream");
         let buffer = read_message_from_stream(stream)?;
         debug!("Received raw data: {} bytes", buffer.len());
@@ -78,42 +88,78 @@ impl MessageType {
                     MessageType::File { name, content } => {
                         debug!("Deserialized file '{}': {} bytes", name, content.len())
                     }
+                    MessageType::Error { code, message } => {
+                        debug!(
+                            "Deserialized error message: code={}, message={}",
+                            code, message
+                        )
+                    }
                 }
                 Ok(message)
             }
             Err(e) => {
                 error!("Deserialization failed: {}", e);
-                Err(anyhow::anyhow!("Failed to deserialize message: {}", e))
+                Err(ChatError::SerializationError(format!(
+                    "Failed to deserialize message: {}",
+                    e
+                )))
             }
         }
     }
 
-    pub fn handle_received(&self) -> Result<()> {
+    pub fn handle_received(&self) -> AnyhowResult<()> {
         match self {
             MessageType::Text(text) => {
                 info!("Received: {}", text);
+                Ok(())
             }
             MessageType::Image(data) => {
                 info!("Saving image file ({} bytes)", data.len());
-                save_binary_content("images", None, data)?;
+                save_binary_content("images", None, data).with_context(|| {
+                    format!("Failed to save received image ({} bytes)", data.len())
+                })?;
+                Ok(())
             }
             MessageType::File { name, content } => {
                 info!("Saving file '{}' ({} bytes)", name, content.len());
-                save_binary_content("files", Some(name), content)?;
+                save_binary_content("files", Some(name), content).with_context(|| {
+                    format!(
+                        "Failed to save received file '{}' ({} bytes)",
+                        name,
+                        content.len()
+                    )
+                })?;
+                Ok(())
+            }
+            MessageType::Error { code, message } => {
+                error!("Server error (code {}): {}", code, message);
+                Ok(()) // Just log the error, no action needed
             }
         }
-        Ok(())
+    }
+
+    pub fn create_error(code: u32, message: &str) -> Self {
+        MessageType::Error {
+            code,
+            message: message.to_string(),
+        }
     }
 }
 
-fn save_binary_content(dir: &str, filename: Option<&str>, data: &[u8]) -> Result<()> {
+fn save_binary_content(dir: &str, filename: Option<&str>, data: &[u8]) -> ChatResult<()> {
     debug!("Creating directory: {}", dir);
-    fs::create_dir_all(dir)?;
+    fs::create_dir_all(dir).map_err(|e| ChatError::FileError {
+        source: e,
+        context: format!("Failed to create directory '{}'", dir),
+    })?;
 
     let path = match filename {
         Some(name) => format!("{}/{}", dir, name),
         None => {
-            let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| ChatError::MessageError(format!("Time error: {}", e)))?
+                .as_secs();
             format!("{}/{}.png", dir, timestamp)
         }
     };
@@ -125,21 +171,25 @@ fn save_binary_content(dir: &str, filename: Option<&str>, data: &[u8]) -> Result
     );
 
     debug!("Creating file: {}", path);
-    let mut file =
-        File::create(&path).with_context(|| format!("Failed to create file: {}", path))?;
+    let mut file = File::create(&path).map_err(|e| ChatError::FileError {
+        source: e,
+        context: format!("Failed to create file: {}", path),
+    })?;
 
     debug!("Writing {} bytes to file", data.len());
-    file.write_all(data)
-        .with_context(|| format!("Failed to write data to: {}", path))?;
+    file.write_all(data).map_err(|e| ChatError::FileError {
+        source: e,
+        context: format!("Failed to write data to: {}", path),
+    })?;
 
     info!("Successfully saved {} bytes to {}", data.len(), path);
 
     Ok(())
 }
 
-fn read_message_from_stream<T>(stream: &mut T) -> Result<Vec<u8>>
+pub fn read_message_from_stream<T>(stream: &mut T) -> ChatResult<Vec<u8>>
 where
-    T: Read,  // Uses Read trait instead of TcpStream to make testing easier while preserving production behavior.
+    T: Read, // Uses Read trait instead of TcpStream to make testing easier while preserving production behavior.
 {
     let mut len_bytes = [0u8; 4];
 
@@ -152,10 +202,13 @@ where
         Err(e) => {
             if e.kind() == io::ErrorKind::UnexpectedEof {
                 error!("Connection closed by peer while reading message length");
-                return Err(anyhow::anyhow!("Connection closed by peer"));
+                return Err(ChatError::ConnectionClosed);
             } else {
                 error!("Failed to read message length: {}", e);
-                return Err(anyhow::anyhow!("Failed to read message length: {}", e));
+                return Err(ChatError::ConnectionError(format!(
+                    "Failed to read message length: {}",
+                    e
+                )));
             }
         }
     }
@@ -166,13 +219,13 @@ where
     // Sanity check the length to avoid allocating too much memory
     if len == 0 {
         warn!("Received zero-length message");
-        return Err(anyhow::anyhow!("Zero-length message received"));
+        return Err(ChatError::EmptyMessage);
     }
 
     if len > 100_000_000 {
         // 100MB limit
         warn!("Message exceeds size limit: {} bytes (max: 100MB)", len);
-        return Err(anyhow::anyhow!("Message too large: {} bytes", len));
+        return Err(ChatError::MessageTooLarge(len));
     }
 
     debug!("Allocating buffer for {} bytes", len);
@@ -188,9 +241,7 @@ where
                     "Connection closed after reading {} of {} bytes",
                     bytes_read, len
                 );
-                return Err(anyhow::anyhow!(
-                    "Connection closed before reading full message"
-                ));
+                return Err(ChatError::ConnectionClosed);
             }
             Ok(n) => {
                 trace!("Read chunk of {} bytes", n);
@@ -198,7 +249,10 @@ where
             }
             Err(e) => {
                 error!("Error reading from stream: {}", e);
-                return Err(anyhow::anyhow!("Failed to read message data: {}", e));
+                return Err(ChatError::ConnectionError(format!(
+                    "Failed to read message data: {}",
+                    e
+                )));
             }
         }
     }
@@ -207,7 +261,7 @@ where
     Ok(buffer)
 }
 
-pub fn send_serialized_message(stream: &mut TcpStream, serialized: &[u8]) -> Result<()> {
+pub fn send_serialized_message(stream: &mut TcpStream, serialized: &[u8]) -> AnyhowResult<()> {
     // Send the length of the serialized message (as 4-byte value).
     let len = serialized.len() as u32;
     debug!("Sending message length: {} bytes", len);
@@ -229,7 +283,7 @@ pub fn send_serialized_message(stream: &mut TcpStream, serialized: &[u8]) -> Res
     Ok(())
 }
 
-fn read_file_to_vec(path: &Path) -> Result<Vec<u8>> {
+fn read_file_to_vec(path: &Path) -> AnyhowResult<Vec<u8>> {
     debug!("Reading file: {}", path.display());
 
     let file =
@@ -241,7 +295,7 @@ fn read_file_to_vec(path: &Path) -> Result<Vec<u8>> {
     debug!("Reading file content");
     buf_read
         .read_to_end(&mut content)
-        .with_context(|| format!("Failed to read file: {}", path.display()))?;
+        .with_context(|| format!("Failed to read file contents: {}", path.display()))?;
 
     debug!(
         "Successfully read {} bytes from {}",
@@ -267,7 +321,7 @@ fn get_filename_as_string(path: &Path) -> String {
     filename
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct ParseMessageError;
 
 impl FromStr for MessageType {
@@ -318,6 +372,16 @@ impl FromStr for MessageType {
             }
         }
     }
+}
+
+// Error code constants
+pub mod error_codes {
+    pub const CONNECTION_ERROR: u32 = 1000;
+    pub const MESSAGE_ERROR: u32 = 2000;
+    pub const PROTOCOL_ERROR: u32 = 3000;
+    pub const FILE_ERROR: u32 = 4000;
+    pub const SERVER_ERROR: u32 = 5000;
+    pub const CLIENT_ERROR: u32 = 6000;
 }
 
 #[cfg(test)]
