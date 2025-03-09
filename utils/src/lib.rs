@@ -137,7 +137,10 @@ fn save_binary_content(dir: &str, filename: Option<&str>, data: &[u8]) -> Result
     Ok(())
 }
 
-fn read_message_from_stream(stream: &mut TcpStream) -> Result<Vec<u8>> {
+fn read_message_from_stream<T>(stream: &mut T) -> Result<Vec<u8>>
+where
+    T: Read,  // Uses Read trait instead of TcpStream to make testing easier while preserving production behavior.
+{
     let mut len_bytes = [0u8; 4];
 
     debug!("Reading message length prefix (4 bytes)");
@@ -317,11 +320,233 @@ impl FromStr for MessageType {
     }
 }
 
-// TODO write tests
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+    use std::net::{TcpListener, TcpStream};
+    use std::path::PathBuf;
+    use std::thread;
+    use tempfile::tempdir;
+
+    // Helper function to create a temporary file with content
+    fn create_temp_file(dir: &Path, name: &str, content: &[u8]) -> PathBuf {
+        let file_path = dir.join(name);
+        let mut file = File::create(&file_path).unwrap();
+        file.write_all(content).unwrap();
+        file_path
+    }
 
     #[test]
-    fn it_works() {}
+    fn test_message_type_serialization_text() {
+        let message = MessageType::Text("Hello, world!".to_string());
+
+        let serialized = message.serialize().unwrap();
+        let deserialized = MessageType::deserialize(&serialized).unwrap();
+
+        match deserialized {
+            MessageType::Text(text) => assert_eq!(text, "Hello, world!"),
+            _ => panic!("Deserialized to wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_message_type_serialization_image() {
+        let image_data = vec![0, 1, 2, 3, 4, 5]; // Mock image data
+        let message = MessageType::Image(image_data.clone());
+
+        let serialized = message.serialize().unwrap();
+        let deserialized = MessageType::deserialize(&serialized).unwrap();
+
+        match deserialized {
+            MessageType::Image(data) => assert_eq!(data, image_data),
+            _ => panic!("Deserialized to wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_message_type_serialization_file() {
+        let file_name = "test.txt".to_string();
+        let file_content = vec![10, 20, 30, 40, 50]; // Mock file content
+        let message = MessageType::File {
+            name: file_name.clone(),
+            content: file_content.clone(),
+        };
+
+        let serialized = message.serialize().unwrap();
+        let deserialized = MessageType::deserialize(&serialized).unwrap();
+
+        match deserialized {
+            MessageType::File { name, content } => {
+                assert_eq!(name, file_name);
+                assert_eq!(content, file_content);
+            }
+            _ => panic!("Deserialized to wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_save_binary_content() {
+        let temp_dir = tempdir().unwrap();
+        let test_dir = temp_dir.path().join("test_dir");
+
+        let data = vec![1, 2, 3, 4, 5];
+        let filename = "test_file.bin";
+
+        save_binary_content(test_dir.to_str().unwrap(), Some(filename), &data).unwrap();
+
+        let mut saved_path = test_dir.clone();
+        saved_path.push(filename);
+        assert!(saved_path.exists());
+
+        let saved_content = fs::read(&saved_path).unwrap();
+        assert_eq!(saved_content, data);
+    }
+
+    #[test]
+    fn test_read_file_to_vec() {
+        let temp_dir = tempdir().unwrap();
+        let test_content = b"This is a test file";
+        let file_path = create_temp_file(temp_dir.path(), "test_read.txt", test_content);
+
+        let content = read_file_to_vec(&file_path).unwrap();
+
+        assert_eq!(content, test_content);
+    }
+
+    #[test]
+    fn test_get_filename_as_string() {
+        let path = Path::new("/path/to/some/file.txt");
+        let filename = get_filename_as_string(path);
+        assert_eq!(filename, "file.txt");
+    }
+
+    #[test]
+    fn test_parse_text_message() {
+        let input = "This is a test message";
+        let message = MessageType::from_str(input).unwrap();
+
+        match message {
+            MessageType::Text(text) => assert_eq!(text, input),
+            _ => panic!("Parsed to wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_parse_file_message() {
+        let temp_dir = tempdir().unwrap();
+        let test_content = b"Test file content";
+        let file_path = create_temp_file(temp_dir.path(), "test_parse.txt", test_content);
+
+        let command = format!(".file {}", file_path.display());
+
+        let message = MessageType::from_str(&command).unwrap();
+
+        match message {
+            MessageType::File { name, content } => {
+                assert_eq!(name, "test_parse.txt");
+                assert_eq!(content, test_content);
+            }
+            _ => panic!("Parsed to wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_parse_image_message() {
+        let temp_dir = tempdir().unwrap();
+        let test_content = b"Fake image data";
+        let file_path = create_temp_file(temp_dir.path(), "test_image.png", test_content);
+
+        let command = format!(".image {}", file_path.display());
+
+        let message = MessageType::from_str(&command).unwrap();
+
+        match message {
+            MessageType::Image(content) => {
+                assert_eq!(content, test_content);
+            }
+            _ => panic!("Parsed to wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_parse_invalid_file() {
+        let command = ".file /path/to/nonexistent/file.txt";
+        let result = MessageType::from_str(command);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_write_tcp() {
+        // Start a TCP server
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_thread = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+
+            let message = MessageType::receive_message(&mut stream).unwrap();
+
+            match message {
+                MessageType::Text(text) => assert_eq!(text, "Test TCP message"),
+                _ => panic!("Received wrong message type"),
+            }
+
+            let response = MessageType::Text("Response from server".to_string());
+            response.send_message(&mut stream).unwrap();
+        });
+
+        // Connect to the server
+        let mut client = TcpStream::connect(addr).unwrap();
+
+        // Send a message
+        let message = MessageType::Text("Test TCP message".to_string());
+        message.send_message(&mut client).unwrap();
+
+        // Receive the response
+        let response = MessageType::receive_message(&mut client).unwrap();
+
+        match response {
+            MessageType::Text(text) => assert_eq!(text, "Response from server"),
+            _ => panic!("Received wrong message type"),
+        }
+
+        server_thread.join().unwrap();
+    }
+
+    #[test]
+    fn test_read_message_empty_stream() {
+        // Test reading from an empty stream
+        let data: Vec<u8> = vec![];
+        let mut cursor = Cursor::new(data);
+
+        let result = read_message_from_stream(&mut cursor);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_message_invalid_length() {
+        // Create a stream with an invalid length prefix (too large)
+        let mut data = Vec::new();
+        let len: u32 = 200_000_000; // 200MB (exceeds limit)
+        data.extend_from_slice(&len.to_be_bytes());
+
+        let mut cursor = Cursor::new(data);
+
+        let result = read_message_from_stream(&mut cursor);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_message_zero_length() {
+        // Create a stream with a zero length prefix
+        let mut data = Vec::new();
+        let len: u32 = 0;
+        data.extend_from_slice(&len.to_be_bytes());
+
+        let mut cursor = Cursor::new(data);
+
+        let result = read_message_from_stream(&mut cursor);
+        assert!(result.is_err());
+    }
 }
