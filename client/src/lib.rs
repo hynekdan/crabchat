@@ -1,22 +1,23 @@
-use anyhow::{Context, Result as AnyhowResult};
-use std::io::{self, Write};
-use std::net::TcpStream;
-use std::str::FromStr;
-use std::thread;
+use anyhow::{Context, Result as AnyhowResult, anyhow};
+use std::path::Path;
+use tokio::io::{self as tokio_io, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use utils::errors::ChatError;
+use utils::{LocalCommandType, MessageType, get_filename_as_string, parse_input, read_file_to_vec};
 
-use utils::MessageType;
-
-pub fn run_client(hostname: &str, port: u16) -> AnyhowResult<()> {
+pub async fn run_client(hostname: &str, port: u16, username: Option<String>) -> AnyhowResult<()> {
     let address = format!("{}:{}", hostname, port);
+    let user = username.ok_or_else(|| anyhow!("Username is required (.e.g., -u Daniel)"))?;
 
-    info!("Client connecting to {}", address);
+    info!("Client '{}' connecting to {}", user, address);
     print_usage_instructions();
 
     // Connect to the server - one connection for both sending and receiving
     debug!("Attempting TCP connection to {}", address);
-    let mut server_stream = TcpStream::connect(&address)
+    let server_stream = TcpStream::connect(&address)
+        .await
         .with_context(|| format!("Failed to connect to server at {}", address))?;
 
     // Configure socket options
@@ -24,109 +25,197 @@ pub fn run_client(hostname: &str, port: u16) -> AnyhowResult<()> {
         warn!("Failed to set TCP_NODELAY: {}", e);
     }
 
-    info!("Connected to server!");
+    info!("Connected to server! Attempting login...");
 
-    // Clone the stream for the receiver thread
-    let mut receiver_stream = server_stream
-        .try_clone()
-        .with_context(|| "Failed to clone TCP stream for receiver thread")?;
+    // Split the stream into reader and writer
+    let (reader, mut writer) = tokio_io::split(server_stream);
+    let mut buf_reader = BufReader::new(reader);
 
-    // Start a thread to receive messages
-    debug!("Spawning receiver thread");
-    thread::spawn(move || {
-        info!("Message receiver thread started");
+    // Login - currently without password
+    let login_msg = MessageType::Login(user.clone());
+    login_msg
+        .send(&mut writer)
+        .await
+        .context("Failed to send login message")?;
+    debug!("Login message sent for user '{}'", user);
+
+    // Wait for LoginOk or Error
+    match MessageType::receive(&mut buf_reader).await {
+        Ok(MessageType::LoginOk) => {
+            info!("Login successful!");
+        }
+        Ok(MessageType::Error(err_msg)) => {
+            error!("Login failed: {}", err_msg);
+            return Err(anyhow!("Server rejected login: {}", err_msg));
+        }
+        Ok(other) => {
+            error!(
+                "Unexpected message received after login attempt: {:?}",
+                other
+            );
+            return Err(anyhow!("Unexpected response from server during login"));
+        }
+        Err(e) => {
+            error!("Failed to receive login response: {}", e);
+            return Err(e).context("Connection error during login");
+        }
+    }
+
+    // Channel for signaling shutdown from input task to receiver task
+    let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+
+    // Receiver Task
+    let save_path = Path::new("client_received").to_path_buf();
+    tokio::spawn(async move {
+        info!("Message receiver task started.");
         loop {
-            // Receive and handle messages from the server
-            debug!("Waiting for incoming message from server");
-            match MessageType::receive_message(&mut receiver_stream) {
-                Ok(message) => {
-                    debug!("Received message from server: {:?}", message);
-                    if let Err(e) = message.handle_received() {
-                        error!("Error handling received message: {:#}", e);
-                        let chat_error: ChatError = e.into();
-                        chat_error.display_error_message();
+            tokio::select! {
+                // Wait for incoming message or shutdown signal
+                result = MessageType::receive(&mut buf_reader) => {
+                    match result {
+                        Ok(message) => {
+                            debug!("Received message from server: {:?}", message);
+                            if let Err(e) = message.handle_received_client(&save_path).await {
+                                error!("Error handling received message: {:#}", e);
+                            }
+                        }
+                        Err(ChatError::ConnectionClosed) => {
+                            info!("Connection closed by server. Receiver task exiting.");
+                            break;
+                        }
+                        Err(e) => {
+                            error!("Error receiving message from server: {}", e);
+                            // If there is a connection error, exit the loop
+                            if matches!(e, ChatError::ConnectionError(_)) {
+                                break;
+                            }
+                        }
                     }
-                }
-                Err(e) => {
-                    error!("Error receiving message from server: {}", e);
-                    e.display_error_message();
-
-                    if matches!(e, ChatError::ConnectionClosed) {
-                        info!("Connection to server lost. Exiting receiver thread.");
-                        info!("Connection to server lost. You may continue typing, but messages won't be sent.");
-                        info!("Please restart the client to reconnect.");
-                        break;
-                    }
+                },
+                 _ = shutdown_rx.recv() => {
+                    info!("Shutdown signal received. Receiver task exiting.");
+                    break;
                 }
             }
         }
-        info!("Receiver thread terminated");
+        info!("Receiver task terminated");
     });
 
     // Main loop for sending messages
-    info!("Starting main message loop, enter messages to send");
+    info!("Enter messages, .file <path>, .image <path>, .help, or .quit");
+    let mut stdin_reader = BufReader::new(tokio_io::stdin());
+    let mut input_buf = String::new();
+
     loop {
+        input_buf.clear();
         info!("> ");
-        io::stdout()
+        tokio_io::stdout()
             .flush()
-            .with_context(|| "Failed to flush stdout")?;
+            .await
+            .context("Failed to flush stdout")?;
 
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .with_context(|| "Failed to read input")?;
-
-        let trimmed_input = input.trim();
-
-        if trimmed_input.is_empty() {
-            debug!("Empty input, skipping");
-            continue;
-        }
-
-        if trimmed_input == ".quit" {
-            info!("Shutting down the client");
-            break;
-        }
-
-        if trimmed_input == ".help" {
-            print_usage_instructions();
-            continue;
-        }
-
-        debug!("Parsing input: '{}'", trimmed_input);
-        let message = MessageType::from_str(trimmed_input);
-
-        match message {
-            Ok(msg) => {
-                debug!("Successfully parsed message: {:?}", msg);
-                info!("Sending message to server");
-                if let Err(e) = msg.send_message(&mut server_stream) {
-                    error!("Failed to send message: {:#}", e);
-
-                    // Check if the error is a connection error - need to convert to ChatError to check
-                    let chat_error: ChatError = e.into();
-                    chat_error.display_error_message();
-
-                    if matches!(chat_error, ChatError::ConnectionClosed) {
-                        error!(
-                            "Connection to server lost. Please restart the client to reconnect."
-                        );
-                        break;
-                    } else {
-                        warn!("Connection to server might be unstable. Try again or quit.");
+        // Read line async
+        match stdin_reader.read_line(&mut input_buf).await {
+            Ok(0) => {
+                info!("Stdin closed. Shutting down.");
+                break; // EOF
+            }
+            Ok(_) => {
+                // Parse the input
+                match parse_input(&input_buf) {
+                    Ok(MessageType::LocalCommand(cmd)) => {
+                        match cmd {
+                            LocalCommandType::Quit => {
+                                info!("Quit command received. Shutting down.");
+                                break;
+                            }
+                            LocalCommandType::Help => {
+                                print_usage_instructions();
+                                continue;
+                            }
+                            LocalCommandType::SendFile(path) => {
+                                match read_file_to_vec(&path).await {
+                                    Ok(content) => {
+                                        let name = get_filename_as_string(&path);
+                                        info!("Sending file '{}' ({} bytes)", name, content.len());
+                                        let msg = MessageType::File { name, content };
+                                        if let Err(e) = msg.send(&mut writer).await {
+                                            error!("Failed to send file message: {}", e);
+                                            if matches!(
+                                                e,
+                                                ChatError::ConnectionClosed
+                                                    | ChatError::ConnectionError(_)
+                                            ) {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to read file {}: {}", path.display(), e)
+                                    }
+                                }
+                            }
+                            LocalCommandType::SendImage(path) => {
+                                match read_file_to_vec(&path).await {
+                                    Ok(content) => {
+                                        info!(
+                                            "Sending image '{}' ({} bytes)",
+                                            path.display(),
+                                            content.len()
+                                        );
+                                        let msg = MessageType::Image(content);
+                                        if let Err(e) = msg.send(&mut writer).await {
+                                            error!("Failed to send image message: {}", e);
+                                            if matches!(
+                                                e,
+                                                ChatError::ConnectionClosed
+                                                    | ChatError::ConnectionError(_)
+                                            ) {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to read image {}: {}", path.display(), e)
+                                    }
+                                }
+                            }
+                        }
                     }
-                } else {
-                    debug!("Message sent successfully");
+                    Ok(msg @ MessageType::Text(_)) => {
+                        debug!("Sending text message");
+                        if let Err(e) = msg.send(&mut writer).await {
+                            error!("Failed to send text message: {}", e);
+                            if matches!(
+                                e,
+                                ChatError::ConnectionClosed | ChatError::ConnectionError(_)
+                            ) {
+                                break;
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        warn!("Unexpected message type parsed from input: {:?}", input_buf);
+                    }
+                    Err(e) => {
+                        error!("Input error: {}", e);
+                        if e == "Input is empty" {
+                            continue;
+                        }
+                        print_usage_instructions();
+                    }
                 }
             }
-            Err(_) => {
-                error!("Failed to parse input: {}", trimmed_input);
-                error!("Invalid input. Type .help for usage instructions.");
+            Err(e) => {
+                error!("Failed to read stdin: {}", e);
+                break;
             }
         }
     }
 
-    debug!("Client main loop exited, returning normally");
+    let _ = shutdown_tx.send(()).await; // Ignore error if receiver already closed
+
+    info!("Client shutting down gracefully.");
     Ok(())
 }
 

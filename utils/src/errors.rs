@@ -1,5 +1,6 @@
 use std::io;
 use thiserror::Error;
+use sqlx;
 
 #[derive(Error, Debug)]
 pub enum ChatError {
@@ -36,6 +37,12 @@ pub enum ChatError {
 
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+
+    #[error("Authentication failed: {0}")]
+    AuthError(String),
+
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] sqlx::Error),
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -104,6 +111,12 @@ impl ChatError {
             }
             ChatError::InvalidInput(msg) => {
                 println!("Invalid input: {}", msg);
+            }
+            ChatError::AuthError(msg) => {
+                println!("Authentication error: {}", msg);
+            }
+            ChatError::DatabaseError(e) => {
+                println!("Database error: {}", e);
             }
             ChatError::Other(e) => {
                 println!("Error: {}", e);
