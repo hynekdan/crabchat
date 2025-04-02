@@ -399,21 +399,24 @@ pub mod error_codes {
 mod tests {
     use super::*;
     use std::io::Cursor;
-    use std::net::{TcpListener, TcpStream};
+    use tokio::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
     use std::thread;
     use tempfile::tempdir;
+    use tokio::fs;
+    use tokio::io::AsyncWriteExt;
 
     // Helper function to create a temporary file with content
     fn create_temp_file(dir: &Path, name: &str, content: &[u8]) -> PathBuf {
         let file_path = dir.join(name);
-        let mut file = File::create(&file_path).unwrap();
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        use std::io::Write;
         file.write_all(content).unwrap();
         file_path
     }
 
-    #[test]
-    fn test_message_type_serialization_text() {
+    #[tokio::test]
+    async fn test_message_type_serialization_text() {
         let message = MessageType::Text("Hello, world!".to_string());
 
         let serialized = message.serialize().unwrap();
@@ -425,8 +428,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_message_type_serialization_image() {
+    #[tokio::test]
+    async fn test_message_type_serialization_image() {
         let image_data = vec![0, 1, 2, 3, 4, 5]; // Mock image data
         let message = MessageType::Image(image_data.clone());
 
@@ -439,8 +442,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_message_type_serialization_file() {
+    #[tokio::test]
+    async fn test_message_type_serialization_file() {
         let file_name = "test.txt".to_string();
         let file_content = vec![10, 20, 30, 40, 50]; // Mock file content
         let message = MessageType::File {
@@ -460,31 +463,32 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_save_binary_content() {
+    #[tokio::test]
+    async fn test_save_binary_content() {
         let temp_dir = tempdir().unwrap();
         let test_dir = temp_dir.path().join("test_dir");
 
         let data = vec![1, 2, 3, 4, 5];
         let filename = "test_file.bin";
 
-        save_binary_content(test_dir.to_str().unwrap(), Some(filename), &data).unwrap();
+        save_binary_content(&test_dir, Some(filename), &data)
+            .await
+            .unwrap();
 
-        let mut saved_path = test_dir.clone();
-        saved_path.push(filename);
+        let saved_path = test_dir.join(filename);
         assert!(saved_path.exists());
 
-        let saved_content = fs::read(&saved_path).unwrap();
+        let saved_content = fs::read(&saved_path).await.unwrap();
         assert_eq!(saved_content, data);
     }
 
-    #[test]
-    fn test_read_file_to_vec() {
+    #[tokio::test]
+    async fn test_read_file_to_vec() {
         let temp_dir = tempdir().unwrap();
         let test_content = b"This is a test file";
         let file_path = create_temp_file(temp_dir.path(), "test_read.txt", test_content);
 
-        let content = read_file_to_vec(&file_path).unwrap();
+        let content = read_file_to_vec(&file_path).await.unwrap();
 
         assert_eq!(content, test_content);
     }
@@ -496,10 +500,10 @@ mod tests {
         assert_eq!(filename, "file.txt");
     }
 
-    #[test]
-    fn test_parse_text_message() {
+    #[tokio::test]
+    async fn test_parse_text_message() {
         let input = "This is a test message";
-        let message = MessageType::from_str(input).unwrap();
+        let message = parse_input(input).unwrap();
 
         match message {
             MessageType::Text(text) => assert_eq!(text, input),
@@ -507,60 +511,59 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_parse_file_message() {
+    #[tokio::test]
+    async fn test_parse_file_message() {
         let temp_dir = tempdir().unwrap();
         let test_content = b"Test file content";
         let file_path = create_temp_file(temp_dir.path(), "test_parse.txt", test_content);
 
         let command = format!(".file {}", file_path.display());
 
-        let message = MessageType::from_str(&command).unwrap();
+        let message = parse_input(&command).unwrap();
 
         match message {
-            MessageType::File { name, content } => {
-                assert_eq!(name, "test_parse.txt");
-                assert_eq!(content, test_content);
+            MessageType::LocalCommand(LocalCommandType::SendFile(path)) => {
+                assert_eq!(path.file_name().unwrap(), "test_parse.txt");
             }
             _ => panic!("Parsed to wrong message type"),
         }
     }
 
-    #[test]
-    fn test_parse_image_message() {
+    #[tokio::test]
+    async fn test_parse_image_message() {
         let temp_dir = tempdir().unwrap();
         let test_content = b"Fake image data";
         let file_path = create_temp_file(temp_dir.path(), "test_image.png", test_content);
 
         let command = format!(".image {}", file_path.display());
 
-        let message = MessageType::from_str(&command).unwrap();
+        let message = parse_input(&command).unwrap();
 
         match message {
-            MessageType::Image(content) => {
-                assert_eq!(content, test_content);
+            MessageType::LocalCommand(LocalCommandType::SendImage(path)) => {
+                assert_eq!(path.file_name().unwrap(), "test_image.png");
             }
             _ => panic!("Parsed to wrong message type"),
         }
     }
 
-    #[test]
-    fn test_parse_invalid_file() {
+    #[tokio::test]
+    async fn test_parse_invalid_file() {
         let command = ".file /path/to/nonexistent/file.txt";
-        let result = MessageType::from_str(command);
+        let result = parse_input(command);
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_read_write_tcp() {
+    #[tokio::test]
+    async fn test_read_write_tcp() {
         // Start a TCP server
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let server_thread = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+        let server_thread = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
 
-            let message = MessageType::receive_message(&mut stream).unwrap();
+            let message = MessageType::receive(&mut stream).await.unwrap();
 
             match message {
                 MessageType::Text(text) => assert_eq!(text, "Test TCP message"),
@@ -568,39 +571,39 @@ mod tests {
             }
 
             let response = MessageType::Text("Response from server".to_string());
-            response.send_message(&mut stream).unwrap();
+            response.send(&mut stream).await.unwrap();
         });
 
         // Connect to the server
-        let mut client = TcpStream::connect(addr).unwrap();
+        let mut client = TcpStream::connect(addr).await.unwrap();
 
         // Send a message
         let message = MessageType::Text("Test TCP message".to_string());
-        message.send_message(&mut client).unwrap();
+        message.send(&mut client).await.unwrap();
 
         // Receive the response
-        let response = MessageType::receive_message(&mut client).unwrap();
+        let response = MessageType::receive(&mut client).await.unwrap();
 
         match response {
             MessageType::Text(text) => assert_eq!(text, "Response from server"),
             _ => panic!("Received wrong message type"),
         }
 
-        server_thread.join().unwrap();
+        server_thread.await.unwrap();
     }
 
-    #[test]
-    fn test_read_message_empty_stream() {
+    #[tokio::test]
+    async fn test_read_message_empty_stream() {
         // Test reading from an empty stream
         let data: Vec<u8> = vec![];
         let mut cursor = Cursor::new(data);
 
-        let result = read_message_from_stream(&mut cursor);
+        let result = read_message_from_stream(&mut cursor).await;
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_read_message_invalid_length() {
+    #[tokio::test]
+    async fn test_read_message_invalid_length() {
         // Create a stream with an invalid length prefix (too large)
         let mut data = Vec::new();
         let len: u32 = 200_000_000; // 200MB (exceeds limit)
@@ -608,12 +611,12 @@ mod tests {
 
         let mut cursor = Cursor::new(data);
 
-        let result = read_message_from_stream(&mut cursor);
+        let result = read_message_from_stream(&mut cursor).await;
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_read_message_zero_length() {
+    #[tokio::test]
+    async fn test_read_message_zero_length() {
         // Create a stream with a zero length prefix
         let mut data = Vec::new();
         let len: u32 = 0;
@@ -621,7 +624,7 @@ mod tests {
 
         let mut cursor = Cursor::new(data);
 
-        let result = read_message_from_stream(&mut cursor);
+        let result = read_message_from_stream(&mut cursor).await;
         assert!(result.is_err());
     }
 }
