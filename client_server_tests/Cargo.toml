@@ -1,0 +1,10 @@
+[package]
+name = "client_server_tests"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+utils = { version = "0.1.0", path = "../utils" }
+client = { version = "0.1.0", path = "../client" }
+server = { version = "0.1.0", path = "../server" }
+tokio = { workspace = true }

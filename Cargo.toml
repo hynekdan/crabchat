@@ -8,6 +8,7 @@ members = [
     "client",
     "server",
     "utils",
+    "client_server_tests", # ugly way but seems to be commonly used
 ]
 # default resolver for 2024
 resolver = "3"
@@ -19,7 +20,7 @@ clap = { version = "4.5.31", features = ["derive"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"]}
 thiserror = "2.0.12"
-tokio = { version = "1.44.1", features = ["full"] }
+tokio = { version = "1.44.1", features = ["full", "test-util"] }
 sqlx = { version = "0.8.3", features = ["runtime-tokio-rustls", "postgres", "macros", "chrono"] }
 chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15.7"
