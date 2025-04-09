@@ -1,3 +1,27 @@
+//! Utility library for the CrabChat application.
+//!
+//! This module provides shared functionality for both the client and server, including:
+//! - Message serialization and deserialization
+//! - File and image handling
+//! - Network protocol helpers
+//! - Command-line argument parsing
+//!
+//! # Examples
+//!
+//! ## Serializing and Deserializing Messages
+//! ```rust
+//! use utils::MessageType;
+//!
+//! let message = MessageType::Text("Hello, CrabChat!".to_string());
+//! let serialized = message.serialize().unwrap();
+//! let deserialized = MessageType::deserialize(&serialized).unwrap();
+//!
+//! match deserialized {
+//!     MessageType::Text(text) => assert_eq!(text, "Hello, CrabChat!"),
+//!     _ => panic!("Unexpected message type"),
+//! }
+//! ```
+
 use anyhow::{Context, Result as AnyhowResult};
 use serde::{Deserialize, Serialize};
 use serde_cbor::Result as CborResult;
@@ -12,6 +36,9 @@ pub use errors::{ChatError, ChatResult};
 
 use clap::Parser;
 
+/// Command-line arguments for the CrabChat application.
+///
+/// This struct is used to parse and store command-line arguments for both the client and server.
 #[derive(Parser, Debug)]
 #[command(
     author = "hynekdan",
@@ -21,37 +48,77 @@ use clap::Parser;
 )]
 pub struct Cli {
     // using H instead of h to avoid conflict with standard -h for help
+    /// Hostname or IP address to connect to (default: localhost).
     #[arg(short = 'H', long, default_value = "localhost")]
     pub hostname: String,
 
+    /// Port number to connect to (default: 11111).
     #[arg(short, long, default_value_t = 11111)]
     pub port: u16,
 
+    /// Username for the client (for the client, not used by the server).
     #[arg(short, long)]
-    pub username: Option<String>, // Optional for client, server doesn't use username
+    pub username: Option<String>,
 }
 
+/// Represents the types of messages exchanged between the client and server.
+///
+/// This enum includes variants for text messages, file transfers, image transfers,
+/// and error messages.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum MessageType {
+    /// Login message containing the username.
     Login(String),
+
+    /// Acknowledgment of a successful login.
     LoginOk,
+
+    /// A text message.
     Text(String),
+
+    /// An image message containing binary data.
     Image(Vec<u8>),
+
+    /// A file message containing the file name and binary content.
     File { name: String, content: Vec<u8> },
+
+    /// An error message containing a description of the error.
     Error(String),
+
+    /// A local command (used only on the client side).
     #[serde(skip)]
     LocalCommand(LocalCommandType),
 }
 
+/// Represents local commands that can be executed by the client.
+///
+/// These commands are not sent over the network.
 #[derive(Debug, Clone)]
 pub enum LocalCommandType {
+    /// Command to send a file.
     SendFile(PathBuf),
+
+    /// Command to send an image.
     SendImage(PathBuf),
+
+    /// Command to quit the application.
     Quit,
+
+    /// Command to display help information.
     Help,
 }
 
 impl MessageType {
+    /// Serializes the message into a CBOR-encoded byte vector.
+    ///
+    /// # Examples
+    /// ```rust
+    /// use utils::MessageType;
+    ///
+    /// let message = MessageType::Text("Hello, CrabChat!".to_string());
+    /// let serialized = message.serialize().unwrap();
+    /// assert!(!serialized.is_empty());
+    /// ```
     pub fn serialize(&self) -> CborResult<Vec<u8>> {
         let result = serde_cbor::to_vec(&self);
         if let Err(ref e) = result {
@@ -61,8 +128,9 @@ impl MessageType {
         }
         result
     }
-
-    fn deserialize(input: &[u8]) -> CborResult<Self> {
+    
+    /// Deserializes a CBOR-encoded byte vector into a `MessageType`.
+    pub fn deserialize(input: &[u8]) -> CborResult<Self> {
         let result = serde_cbor::from_slice(input);
         if let Err(ref e) = result {
             error!("Failed to deserialize data: {}", e);
@@ -75,6 +143,12 @@ impl MessageType {
     // --- Async Network Operations ---
 
     /// Asynchronously sends a message prefixed with its length.
+    ///
+    /// # Arguments
+    /// - `stream`: The async stream to send the message to.
+    ///
+    /// # Errors
+    /// Returns an error if serialization or sending fails.
     pub async fn send<W>(&self, stream: &mut W) -> ChatResult<()>
     where
         W: AsyncWrite + Unpin + ?Sized,
@@ -87,6 +161,12 @@ impl MessageType {
     }
 
     /// Asynchronously receives a length-prefixed message.
+    ///
+    /// # Arguments
+    /// - `stream`: The async stream to receive the message from.
+    ///
+    /// # Errors
+    /// Returns an error if deserialization or receiving fails.
     pub async fn receive<R>(stream: &mut R) -> ChatResult<Self>
     where
         R: AsyncRead + Unpin + ?Sized,
@@ -163,6 +243,28 @@ impl MessageType {
 // --- Async File I/O ---
 
 /// Asynchronously saves binary content to a specified directory.
+///
+/// # Arguments
+/// - `dir`: The directory to save the file in.
+/// - `filename`: The name of the file (optional).
+/// - `data`: The binary data to save.
+///
+/// # Errors
+/// Returns an error if the directory or file cannot be created.
+///
+/// # Examples
+/// ```rust
+/// use utils::save_binary_content;
+/// use std::path::Path;
+/// use tempfile::tempdir;
+///
+/// #[tokio::main]
+/// async fn main() {
+///     let data = b"Hello, world!";
+///     let temp_dir = tempdir().unwrap();
+///     save_binary_content(temp_dir.path(), Some("test.txt"), data).await.unwrap();
+/// }
+/// ```
 pub async fn save_binary_content(
     dir: &Path,
     filename: Option<&str>,
@@ -217,6 +319,12 @@ pub async fn save_binary_content(
 }
 
 /// Asynchronously reads an entire file into a byte vector.
+///
+/// # Arguments
+/// - `path`: The path to the file to read.
+///
+/// # Errors
+/// Returns an error if the file cannot be opened or read.
 pub async fn read_file_to_vec(path: &Path) -> AnyhowResult<Vec<u8>> {
     debug!("Reading file asynchronously: {}", path.display());
 
@@ -251,7 +359,34 @@ pub fn get_filename_as_string(path: &Path) -> String {
 
 // --- Async Network Protocol Helpers ---
 
-/// Reads a length-prefixed message from an async stream.
+/// Reads a length-prefixed message from an async stream. Length prefixing uses 4 bytes in big-endian format.
+///
+/// # Arguments
+/// - `stream`: The async stream to read the message from.
+///
+/// # Errors
+/// Returns an error if the message length is invalid, the connection is closed, or the message cannot be read.
+///
+/// # Examples
+/// ```rust
+/// use utils::{read_message_from_stream, MessageType};
+/// use std::io::Cursor;
+///
+/// #[tokio::main]
+/// async fn main() {
+///     let message = MessageType::Text("Hello, CrabChat!".to_string());
+///     let serialized = message.serialize().unwrap();
+///
+///     let mut data = Vec::new();
+///     let len = serialized.len() as u32;
+///     data.extend_from_slice(&len.to_be_bytes());
+///     data.extend_from_slice(&serialized);
+///
+///     let mut cursor = Cursor::new(data);
+///     let received = read_message_from_stream(&mut cursor).await.unwrap();
+///     assert_eq!(received, serialized);
+/// }
+/// ```
 pub async fn read_message_from_stream<R>(stream: &mut R) -> ChatResult<Vec<u8>>
 where
     R: AsyncRead + Unpin + ?Sized,
@@ -316,7 +451,14 @@ where
     }
 }
 
-/// Sends a length-prefixed message to an async stream.
+/// Sends a length-prefixed message to an async stream. Length prefixing uses 4 bytes in big-endian format.
+///
+/// # Arguments
+/// - `stream`: The async stream to send the message to.
+/// - `serialized`: The serialized message to send.
+///
+/// # Errors
+/// Returns an error if the message cannot be sent or the connection is closed.
 pub async fn send_serialized_message<W>(stream: &mut W, serialized: &[u8]) -> ChatResult<()>
 where
     W: AsyncWrite + Unpin + ?Sized,
@@ -401,10 +543,10 @@ mod tests {
     use std::io::Cursor;
     use tokio::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
-    use std::thread;
+    // use std::thread;
     use tempfile::tempdir;
     use tokio::fs;
-    use tokio::io::AsyncWriteExt;
+    // use tokio::io::AsyncWriteExt;
 
     // Helper function to create a temporary file with content
     fn create_temp_file(dir: &Path, name: &str, content: &[u8]) -> PathBuf {

@@ -1,8 +1,20 @@
+//! Entry point for the CrabChat client application.
+
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 use utils::Cli;
+
+/// Main entry point for the client application.
+///
+/// This function performs the following steps:
+/// 1. Initializes logging using the `tracing` crate.
+/// 2. Parses command-line arguments using `clap`.
+/// 3. Starts the client by calling `client::run_client`.
+///
+/// # Errors
+/// Returns an error if the client fails to initialize or encounters issues while running.
 
 #[tokio::main]
 async fn main() -> Result<()> {

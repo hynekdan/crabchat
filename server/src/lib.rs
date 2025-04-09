@@ -1,3 +1,8 @@
+//! Library module for the CrabChat server application.
+//!
+//! This module contains the core logic for the server, including handling client connections,
+//! managing authentication, broadcasting messages, and storing data in the database.
+
 use anyhow::{Context, Result as AnyhowResult};
 use sqlx::{
     Pool,
@@ -15,6 +20,13 @@ use utils::errors::{ChatError, ChatResult};
 
 use utils::MessageType;
 
+/// Represents the shared state of the server.
+///
+/// This includes:
+/// - A map of active clients.
+/// - A broadcast channel for sending messages to all connected clients.
+/// - A database connection pool.
+/// - A path for saving received files and images.
 struct ServerState {
     clients: Mutex<HashMap<SocketAddr, ClientInfo>>,
     sender: broadcast::Sender<(MessageType, SocketAddr)>,
@@ -22,6 +34,11 @@ struct ServerState {
     server_save_path: Arc<Path>,
 }
 
+/// Represents information about a connected client.
+///
+/// This includes:
+/// - The client's username.
+/// - The client's unique user ID from the database.
 #[derive(Debug, Clone)]
 struct ClientInfo {
     username: String,
@@ -30,6 +47,19 @@ struct ClientInfo {
 
 // --- Database Operations ---
 
+/// Retrieves or inserts a user into the database.
+///
+/// If the user already exists, their ID is returned. Otherwise, a new user is created.
+///
+/// # Arguments
+/// - `pool`: The database connection pool.
+/// - `username`: The username of the user.
+///
+/// # Returns
+/// A tuple containing the user's ID and a boolean indicating whether the user is new.
+///
+/// # Errors
+/// Returns an error if the database query fails.
 #[instrument(skip(pool))]
 async fn get_or_insert_user(
     pool: &Pool<Postgres>,
@@ -55,6 +85,18 @@ async fn get_or_insert_user(
     }
 }
 
+/// Stores a message in the database.
+///
+/// This function saves the message type, content, and optional binary data (e.g., files or images).
+///
+/// # Arguments
+/// - `pool`: The database connection pool.
+/// - `user_id`: The ID of the user who sent the message.
+/// - `message`: The message to store.
+/// - `save_path`: The path where files or images are saved.
+///
+/// # Errors
+/// Returns an error if the database query fails.
 #[instrument(skip(pool, message))]
 async fn store_message(
     pool: &Pool<Postgres>,
@@ -93,6 +135,21 @@ async fn store_message(
 
 // --- Server Logic ---
 
+/// Handles a single client connection.
+///
+/// This function manages the client's lifecycle, including:
+/// - Authenticating the client.
+/// - Receiving and processing messages.
+/// - Broadcasting messages to other clients.
+/// - Cleaning up resources when the client disconnects.
+///
+/// # Arguments
+/// - `state`: The shared server state.
+/// - `stream`: The TCP stream for the client connection.
+/// - `addr`: The client's socket address.
+///
+/// # Errors
+/// Returns an error if there are issues with the connection or message handling.
 #[instrument(skip(state, stream), fields(client_addr = %addr))]
 async fn handle_client(
     state: Arc<ServerState>,
@@ -252,8 +309,21 @@ async fn handle_client(
     Ok(())
 }
 
-/// Handles the initial login message exchange.
-/// Uses the Pool<Postgres> from the state.
+/// Authenticates a client during the initial login phase.
+///
+/// This function validates the client's username and ensures it is unique among connected clients.
+///
+/// # Arguments
+/// - `state`: The shared server state.
+/// - `reader`: The reader for the client's TCP stream.
+/// - `writer`: The writer for the client's TCP stream.
+/// - `addr`: The client's socket address.
+///
+/// # Returns
+/// A `ClientInfo` struct containing the authenticated client's information.
+///
+/// # Errors
+/// Returns an error if authentication fails or the username is invalid.
 #[instrument(skip(state, reader, writer), fields(client_addr = %addr))]
 async fn authenticate_client<R, W>(
     state: &Arc<ServerState>,
@@ -339,6 +409,17 @@ where
     }
 }
 
+/// Primary server function. Starts the server and listens for incoming client connections.
+///
+/// This function sets up the database, initializes the server state, and enters the main loop
+/// to accept and handle client connections.
+///
+/// # Arguments
+/// - `hostname`: The hostname or IP address to bind the server to.
+/// - `port`: The port number to bind the server to.
+///
+/// # Errors
+/// Returns an error if the server fails to start or encounters issues while running.
 pub async fn listen_and_accept(hostname: &str, port: u16) -> AnyhowResult<()> {
     let address = format!("{}:{}", hostname, port);
 

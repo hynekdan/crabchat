@@ -106,5 +106,12 @@ Some of the implemented tests include:
 - **File Handling Tests**: Validate file reading, writing, and parsing commands like `.file`.
 - **TCP Communication Tests**: Test sending and receiving messages over TCP.
 
+### Possible Enhancements
+
+#### User Account Authentication
+To improve security, consider adding authentication for user accounts. Possible approaches include:
+
+- **Password Protection**: Require users to register with a username and password.
+
 ## License
 MIT License

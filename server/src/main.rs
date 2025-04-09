@@ -1,9 +1,22 @@
+//! Entry point for the CrabChat server application.
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use dotenvy::dotenv;
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 use utils::Cli;
+
+/// Main entry point for the server application.
+///
+/// This function performs the following steps:
+/// 1. Loads environment variables from a `.env` file (if present).
+/// 2. Initializes logging using the `tracing` crate.
+/// 3. Parses command-line arguments using `clap`.
+/// 4. Starts the server by calling `server::listen_and_accept`.
+///
+/// # Errors
+/// Returns an error if the server fails to initialize or encounters issues while running.
 
 #[tokio::main]
 async fn main() -> Result<()> {

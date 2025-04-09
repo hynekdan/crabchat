@@ -1,3 +1,8 @@
+//! Library module for the CrabChat client application.
+//!
+//! This module contains the core logic for the client, including connecting to the server,
+//! handling user input, sending and receiving messages, and managing files and images.
+
 use anyhow::{Context, Result as AnyhowResult, anyhow};
 use std::path::Path;
 use tokio::io::{self as tokio_io, AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -7,6 +12,17 @@ use tracing::{debug, error, info, warn};
 use utils::errors::ChatError;
 use utils::{LocalCommandType, MessageType, get_filename_as_string, parse_input, read_file_to_vec};
 
+/// Runs the CrabChat client.
+///
+/// This function connects to the server, handles user input, and processes incoming messages.
+///
+/// # Arguments
+/// - `hostname`: The server's hostname or IP address.
+/// - `port`: The server's port number.
+/// - `username`: The username to use for the client.
+///
+/// # Errors
+/// Returns an error if the client fails to connect to the server, login, or handle messages.
 pub async fn run_client(hostname: &str, port: u16, username: Option<String>) -> AnyhowResult<()> {
     let address = format!("{}:{}", hostname, port);
     let user = username.ok_or_else(|| anyhow!("Username is required (.e.g., -u Daniel)"))?;
