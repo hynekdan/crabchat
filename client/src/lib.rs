@@ -139,65 +139,57 @@ pub async fn run_client(hostname: &str, port: u16, username: Option<String>) -> 
             Ok(_) => {
                 // Parse the input
                 match parse_input(&input_buf) {
-                    Ok(MessageType::LocalCommand(cmd)) => {
-                        match cmd {
-                            LocalCommandType::Quit => {
-                                info!("Quit command received. Shutting down.");
-                                break;
-                            }
-                            LocalCommandType::Help => {
-                                print_usage_instructions();
-                                continue;
-                            }
-                            LocalCommandType::SendFile(path) => {
-                                match read_file_to_vec(&path).await {
-                                    Ok(content) => {
-                                        let name = get_filename_as_string(&path);
-                                        info!("Sending file '{}' ({} bytes)", name, content.len());
-                                        let msg = MessageType::File { name, content };
-                                        if let Err(e) = msg.send(&mut writer).await {
-                                            error!("Failed to send file message: {}", e);
-                                            if matches!(
-                                                e,
-                                                ChatError::ConnectionClosed
-                                                    | ChatError::ConnectionError(_)
-                                            ) {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to read file {}: {}", path.display(), e)
-                                    }
-                                }
-                            }
-                            LocalCommandType::SendImage(path) => {
-                                match read_file_to_vec(&path).await {
-                                    Ok(content) => {
-                                        info!(
-                                            "Sending image '{}' ({} bytes)",
-                                            path.display(),
-                                            content.len()
-                                        );
-                                        let msg = MessageType::Image(content);
-                                        if let Err(e) = msg.send(&mut writer).await {
-                                            error!("Failed to send image message: {}", e);
-                                            if matches!(
-                                                e,
-                                                ChatError::ConnectionClosed
-                                                    | ChatError::ConnectionError(_)
-                                            ) {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to read image {}: {}", path.display(), e)
-                                    }
-                                }
-                            }
+                    Ok(MessageType::LocalCommand(cmd)) => match cmd {
+                        LocalCommandType::Quit => {
+                            info!("Quit command received. Shutting down.");
+                            break;
                         }
-                    }
+                        LocalCommandType::Help => {
+                            print_usage_instructions();
+                            continue;
+                        }
+                        LocalCommandType::SendFile(path) => match read_file_to_vec(&path).await {
+                            Ok(content) => {
+                                let name = get_filename_as_string(&path);
+                                info!("Sending file '{}' ({} bytes)", name, content.len());
+                                let msg = MessageType::File { name, content };
+                                if let Err(e) = msg.send(&mut writer).await {
+                                    error!("Failed to send file message: {}", e);
+                                    if matches!(
+                                        e,
+                                        ChatError::ConnectionClosed | ChatError::ConnectionError(_)
+                                    ) {
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to read file {}: {}", path.display(), e)
+                            }
+                        },
+                        LocalCommandType::SendImage(path) => match read_file_to_vec(&path).await {
+                            Ok(content) => {
+                                info!(
+                                    "Sending image '{}' ({} bytes)",
+                                    path.display(),
+                                    content.len()
+                                );
+                                let msg = MessageType::Image(content);
+                                if let Err(e) = msg.send(&mut writer).await {
+                                    error!("Failed to send image message: {}", e);
+                                    if matches!(
+                                        e,
+                                        ChatError::ConnectionClosed | ChatError::ConnectionError(_)
+                                    ) {
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to read image {}: {}", path.display(), e)
+                            }
+                        },
+                    },
                     Ok(msg @ MessageType::Text(_)) => {
                         debug!("Sending text message");
                         if let Err(e) = msg.send(&mut writer).await {

@@ -7,6 +7,9 @@ use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 use utils::Cli;
 
+use server::ServerConfig;
+
+
 /// Main entry point for the server application.
 ///
 /// This function performs the following steps:
@@ -29,11 +32,19 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     info!(
-        "Attempting to start server on {}:{}...",
-        cli.hostname, cli.port
+        "Attempting to start server on {}:{} with admin interface on {}:{}...",
+        cli.hostname, cli.port, cli.admin_hostname, cli.admin_port
     );
 
-    server::listen_and_accept(&cli.hostname, cli.port)
+    // Create server configuration
+    let config = ServerConfig {
+        hostname: cli.hostname,
+        port: cli.port,
+        admin_hostname: cli.admin_hostname,
+        admin_port: cli.admin_port,
+    };
+
+    server::listen_and_accept(config)
         .await
         .context("Server initialization and listening failed")?;
 

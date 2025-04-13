@@ -2,6 +2,7 @@
 //!
 //! This module contains the core logic for the server, including handling client connections,
 //! managing authentication, broadcasting messages, and storing data in the database.
+//! It also integrates with an admin web interface for user and message management.
 
 use anyhow::{Context, Result as AnyhowResult};
 use sqlx::{
@@ -16,9 +17,21 @@ use tokio::io::{self as tokio_io, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, error, info, instrument, warn};
-use utils::errors::{ChatError, ChatResult};
 
 use utils::MessageType;
+use utils::errors::{ChatError, ChatResult};
+
+// Add the admin module
+mod admin;
+use admin::{AdminConfig, AdminState};
+
+/// Configuration for the chat server.
+pub struct ServerConfig {
+    pub hostname: String,
+    pub port: u16,
+    pub admin_hostname: String,
+    pub admin_port: u16,
+}
 
 /// Represents the shared state of the server.
 ///
@@ -28,7 +41,7 @@ use utils::MessageType;
 /// - A database connection pool.
 /// - A path for saving received files and images.
 struct ServerState {
-    clients: Mutex<HashMap<SocketAddr, ClientInfo>>,
+    clients: Arc<Mutex<HashMap<SocketAddr, ClientInfo>>>,
     sender: broadcast::Sender<(MessageType, SocketAddr)>,
     db_pool: Pool<Postgres>,
     server_save_path: Arc<Path>,
@@ -40,9 +53,9 @@ struct ServerState {
 /// - The client's username.
 /// - The client's unique user ID from the database.
 #[derive(Debug, Clone)]
-struct ClientInfo {
-    username: String,
-    user_id: i64,
+pub struct ClientInfo {
+    pub username: String,
+    pub user_id: i64,
 }
 
 // --- Database Operations ---
@@ -294,10 +307,10 @@ async fn handle_client(
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!("Client {} lagged behind {} messages. Some messages lost.", addr, n);
                      }
-                } 
-            } 
-        } 
-    } 
+                }
+            }
+        }
+    }
 
     // --- Cleanup ---
     info!("Handler loop finished for client {}", addr);
@@ -305,6 +318,9 @@ async fn handle_client(
     if state.sender.send((disconnect_msg, addr)).is_err() {
         debug!("No active listeners for disconnect broadcast.");
     }
+
+    state.clients.lock().await.remove(&addr);
+    info!("Cleaned up resources for client {}", addr);
 
     Ok(())
 }
@@ -410,18 +426,18 @@ where
 }
 
 /// Primary server function. Starts the server and listens for incoming client connections.
+/// Also starts the admin web interface on a separate port.
 ///
 /// This function sets up the database, initializes the server state, and enters the main loop
 /// to accept and handle client connections.
 ///
 /// # Arguments
-/// - `hostname`: The hostname or IP address to bind the server to.
-/// - `port`: The port number to bind the server to.
+/// - `config`: The configuration for the chat server.
 ///
 /// # Errors
 /// Returns an error if the server fails to start or encounters issues while running.
-pub async fn listen_and_accept(hostname: &str, port: u16) -> AnyhowResult<()> {
-    let address = format!("{}:{}", hostname, port);
+pub async fn listen_and_accept(config: ServerConfig) -> AnyhowResult<()> {
+    let address = format!("{}:{}", config.hostname, config.port);
 
     // --- Database Setup ---
     let database_url = std::env::var("DATABASE_URL")
@@ -449,18 +465,39 @@ pub async fn listen_and_accept(hostname: &str, port: u16) -> AnyhowResult<()> {
     info!("Server will save files/images to: {}", save_path.display());
 
     let (sender, _) = broadcast::channel(100);
+    let clients = Arc::new(Mutex::new(HashMap::new()));
+
     let server_state = Arc::new(ServerState {
-        clients: Mutex::new(HashMap::new()),
-        sender,
-        db_pool: pool,
+        clients: Arc::clone(&clients),
+        sender: sender.clone(),
+        db_pool: pool.clone(),
         server_save_path: Arc::from(save_path),
     });
 
-    // --- Main Loop ---
+    // --- Start Admin Web Interface ---
+    let admin_config = AdminConfig {
+        hostname: config.admin_hostname,
+        port: config.admin_port,
+    };
+
+    let admin_state = Arc::new(AdminState {
+        db_pool: pool,
+        clients: Arc::clone(&clients),
+        sender: sender.clone(),
+    });
+
+    // Start admin interface in a separate task
+    tokio::spawn(async move {
+        if let Err(e) = admin::start_admin_interface(admin_config, admin_state).await {
+            error!("Admin interface error: {}", e);
+        }
+    });
+
+    // --- Main Chat Server Loop ---
     let listener = TcpListener::bind(&address)
         .await
         .with_context(|| format!("Failed to bind to {}", address))?;
-    info!("Server listening on {}", address);
+    info!("Chat server listening on {}", address);
 
     loop {
         match listener.accept().await {
@@ -468,7 +505,7 @@ pub async fn listen_and_accept(hostname: &str, port: u16) -> AnyhowResult<()> {
                 info!("New connection from {}", addr);
                 let server_state_clone = Arc::clone(&server_state);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(server_state_clone.clone(), stream, addr).await {
+                    if let Err(e) = handle_client(server_state_clone, stream, addr).await {
                         match e {
                             ChatError::ConnectionClosed => info!("Client {} disconnected.", addr),
                             ChatError::AuthError(msg) => warn!("Auth failed for {}: {}", addr, msg),
@@ -478,9 +515,6 @@ pub async fn listen_and_accept(hostname: &str, port: u16) -> AnyhowResult<()> {
                             _ => error!("Error handling client {}: {}", addr, e),
                         }
                     }
-                    // Cleanup client from state
-                    server_state_clone.clients.lock().await.remove(&addr);
-                    info!("Cleaned up resources for client {}", addr);
                 });
             }
             Err(e) => {

@@ -1,6 +1,6 @@
+use sqlx;
 use std::io;
 use thiserror::Error;
-use sqlx;
 
 #[derive(Error, Debug)]
 pub enum ChatError {

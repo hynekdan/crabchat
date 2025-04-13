@@ -1,8 +1,9 @@
+use client::run_client;
+use server::listen_and_accept;
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use utils::MessageType;
-use server::listen_and_accept;
-use client::run_client;
+use server::ServerConfig;
 
 #[tokio::test]
 async fn test_client_server_integration() {
@@ -10,8 +11,17 @@ async fn test_client_server_integration() {
     let server_task = tokio::spawn(async move {
         let hostname = "127.0.0.1";
         let port = 12345;
+        let admin_hostname = "127.0.0.1";
+        let admin_port = 12346;
 
-        let server_future = listen_and_accept(hostname, port);
+        let server_config = ServerConfig {
+            hostname: hostname.to_string(),
+            port,
+            admin_hostname: admin_hostname.to_string(),
+            admin_port,
+        };
+
+        let server_future = listen_and_accept(server_config);
         tokio::select! {
             _ = server_future => {},
             _ = shutdown_rx => {

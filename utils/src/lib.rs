@@ -59,6 +59,14 @@ pub struct Cli {
     /// Username for the client (for the client, not used by the server).
     #[arg(short, long)]
     pub username: Option<String>,
+    
+    /// Hostname or IP address for the admin interface (default: localhost).
+    #[arg(long, default_value = "localhost")]
+    pub admin_hostname: String,
+
+    /// Port number for the admin interface (default: 11112).
+    #[arg(long, default_value_t = 11112)]
+    pub admin_port: u16,
 }
 
 /// Represents the types of messages exchanged between the client and server.
@@ -128,7 +136,7 @@ impl MessageType {
         }
         result
     }
-    
+
     /// Deserializes a CBOR-encoded byte vector into a `MessageType`.
     pub fn deserialize(input: &[u8]) -> CborResult<Self> {
         let result = serde_cbor::from_slice(input);
@@ -541,12 +549,10 @@ pub mod error_codes {
 mod tests {
     use super::*;
     use std::io::Cursor;
-    use tokio::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
-    // use std::thread;
     use tempfile::tempdir;
     use tokio::fs;
-    // use tokio::io::AsyncWriteExt;
+    use tokio::net::{TcpListener, TcpStream};
 
     // Helper function to create a temporary file with content
     fn create_temp_file(dir: &Path, name: &str, content: &[u8]) -> PathBuf {

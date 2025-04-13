@@ -1,6 +1,6 @@
 # CrabChat
 
-A lightweight messaging application built in Rust supporting text, files, and images.
+A lightweight messaging application built in Rust supporting text, files, and images, with an integrated admin web interface.
 
 ## Features
 - Real-time text messaging
@@ -9,6 +9,7 @@ A lightweight messaging application built in Rust supporting text, files, and im
 - Built-in protections against oversized messages and invalid inputs
 - Asynchronous client and server for high performance
 - Persistent storage of users and messages in a database
+- Admin web interface for user and message management
 
 ## Quick Start
 
@@ -24,6 +25,7 @@ Server:
 ```bash
 cargo run -p server                     # Default (localhost:11111)
 cargo run -p server -- -H 0.0.0.0 -p 8080  # Custom host/port
+cargo run -p server -- --admin-port 8081   # Custom admin port
 ```
 
 Client:
@@ -65,12 +67,33 @@ CrabChat requires a PostgreSQL database for storing users and messages. Ensure y
 - **Exit**: `.quit`
 - **Help**: `.help`
 
+## Admin Interface
+The CrabChat server includes a web-based admin interface for managing users and messages:
+
+### Accessing the Admin Interface
+By default, the admin interface is available at http://localhost:11112 when the server is running.
+
+### Features
+- **User Management**: View all users, see who's online, and delete users
+- **Message Browsing**: View all messages with filtering by user and message type
+- **Message Management**: Delete individual messages
+- **User Activity**: See when users first joined and their message counts
+
+### Configuration
+Configure the admin interface using command-line options:
+```bash
+--admin-hostname <HOST>  # Set admin interface hostname (default: localhost)
+--admin-port <PORT>      # Set admin interface port (default: 11112)
+```
+
 ## Project Structure
 ```
 crabchat/
 ├── Cargo.toml         # Workspace configuration
 ├── client/            # Client application
 ├── server/            # Server application
+│   ├── src/admin.rs   # Admin web interface
+│   └── src/lib.rs     # Server core functionality
 └── utils/             # Shared messaging code
 ```
 
@@ -87,7 +110,8 @@ RUST_LOG=debug cargo run -p server   # Detailed debugging
 - **Safety**: Built-in protections against oversized messages, invalid inputs, and connection failures
 - **Asynchronous Design**: Both client and server are fully async, leveraging `tokio` for high performance
 - **Database**: PostgreSQL is used for persistent storage of users and messages
-- **Dependencies**: serde, clap, tracing, anyhow, tokio, sqlx
+- **Admin Interface**: Built with Axum web framework
+- **Dependencies**: serde, clap, tracing, anyhow, tokio, sqlx, axum
 
 ## Development
 
@@ -112,6 +136,12 @@ Some of the implemented tests include:
 To improve security, consider adding authentication for user accounts. Possible approaches include:
 
 - **Password Protection**: Require users to register with a username and password.
+
+#### Admin Interface Enhancements
+- **Authentication**: Add login requirements for the admin interface
+- **Message Content Preview**: For files and images
+- **User Statistics**: More detailed analytics on user activity
+- **Export Functionality**: Allow exporting message history
 
 ## License
 MIT License
