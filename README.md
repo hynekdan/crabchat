@@ -1,6 +1,6 @@
 # CrabChat
 
-A lightweight messaging application built in Rust supporting text, files, and images, with an integrated admin web interface.
+A lightweight messaging application built in Rust supporting text, files, and images, with an integrated admin web interface and metrics monitoring.
 
 ## Features
 - Real-time text messaging
@@ -10,6 +10,7 @@ A lightweight messaging application built in Rust supporting text, files, and im
 - Asynchronous client and server for high performance
 - Persistent storage of users and messages in a database
 - Admin web interface for user and message management
+- Prometheus metrics for monitoring server activity
 
 ## Quick Start
 
@@ -145,3 +146,4 @@ To improve security, consider adding authentication for user accounts. Possible 
 
 ## License
 MIT License
+

@@ -9,7 +9,6 @@ use utils::Cli;
 
 use server::ServerConfig;
 
-
 /// Main entry point for the server application.
 ///
 /// This function performs the following steps:
@@ -42,6 +41,8 @@ async fn main() -> Result<()> {
         port: cli.port,
         admin_hostname: cli.admin_hostname,
         admin_port: cli.admin_port,
+        metrics_hostname: cli.metrics_hostname,
+        metrics_port: cli.metrics_port,
     };
 
     server::listen_and_accept(config)

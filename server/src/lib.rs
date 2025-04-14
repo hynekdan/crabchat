@@ -26,11 +26,88 @@ mod admin;
 use admin::{AdminConfig, AdminState};
 
 /// Configuration for the chat server.
+#[derive(Clone)]
 pub struct ServerConfig {
     pub hostname: String,
     pub port: u16,
     pub admin_hostname: String,
     pub admin_port: u16,
+    pub metrics_hostname: String,
+    pub metrics_port: u16,
+}
+use lazy_static::lazy_static;
+use prometheus::{Encoder, IntCounter, IntGauge, Registry};
+
+lazy_static! {
+    // Create a custom registry
+    pub static ref REGISTRY: Registry = Registry::new();
+
+    // Define metrics
+    pub static ref MESSAGES_SENT: IntCounter = IntCounter::new(
+        "crabchat_messages_total",
+        "Total number of messages sent through the server"
+    ).expect("Failed to create messages counter");
+
+    pub static ref ACTIVE_CONNECTIONS: IntGauge = IntGauge::new(
+        "crabchat_active_connections",
+        "Number of currently active connections"
+    ).expect("Failed to create connections gauge");
+}
+
+/// Initializes Prometheus metrics and starts the metrics server
+///
+/// This function registers the metrics with Prometheus and starts a web server
+/// to expose them at the /metrics endpoint.
+///
+/// # Arguments
+/// - `metrics_port`: The port number to expose metrics on
+///
+/// # Errors
+/// Returns an error if metrics registration or server setup fails
+pub async fn init_metrics(config: &ServerConfig) -> AnyhowResult<()> {
+    // Register metrics
+    REGISTRY
+        .register(Box::new(MESSAGES_SENT.clone()))
+        .context("Failed to register messages counter")?;
+    REGISTRY
+        .register(Box::new(ACTIVE_CONNECTIONS.clone()))
+        .context("Failed to register connections gauge")?;
+
+    // Create metrics endpoint using axum
+    let app = axum::Router::new().route(
+        "/metrics",
+        axum::routing::get(|| async {
+            let encoder = prometheus::TextEncoder::new();
+            let metric_families = REGISTRY.gather();
+            let mut buffer = Vec::new();
+            encoder.encode(&metric_families, &mut buffer).unwrap();
+            String::from_utf8(buffer).unwrap()
+        }),
+    );
+
+    // Start metrics server
+    let addr = format!("{}:{}", config.metrics_hostname, config.metrics_port);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+
+    info!("Metrics server listening on {}", addr);
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+// Helper function to update metrics when a client connects
+fn increment_connection_metrics() {
+    ACTIVE_CONNECTIONS.inc();
+}
+
+// Helper function to update metrics when a client disconnects
+fn decrement_connection_metrics() {
+    ACTIVE_CONNECTIONS.dec();
+}
+
+// Helper function to update metrics when a message is sent. Message deletion is ignored.
+fn increment_message_metrics() {
+    MESSAGES_SENT.inc();
 }
 
 /// Represents the shared state of the server.
@@ -200,6 +277,7 @@ async fn handle_client(
     loop {
         tokio::select! {
             result = MessageType::receive(&mut buf_reader) => {
+                increment_message_metrics();
                  let message = match result {
                     Ok(msg) => msg,
                     Err(ChatError::ConnectionClosed) => {
@@ -476,7 +554,7 @@ pub async fn listen_and_accept(config: ServerConfig) -> AnyhowResult<()> {
 
     // --- Start Admin Web Interface ---
     let admin_config = AdminConfig {
-        hostname: config.admin_hostname,
+        hostname: config.admin_hostname.clone(),
         port: config.admin_port,
     };
 
@@ -493,6 +571,14 @@ pub async fn listen_and_accept(config: ServerConfig) -> AnyhowResult<()> {
         }
     });
 
+    // Start metrics in a separate task
+    let metrics_config = config.clone();
+    tokio::spawn(async move {
+        if let Err(e) = init_metrics(&metrics_config).await {
+            error!("Metrics error: {}", e);
+        }
+    });
+
     // --- Main Chat Server Loop ---
     let listener = TcpListener::bind(&address)
         .await
@@ -502,6 +588,7 @@ pub async fn listen_and_accept(config: ServerConfig) -> AnyhowResult<()> {
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
+                increment_connection_metrics();
                 info!("New connection from {}", addr);
                 let server_state_clone = Arc::clone(&server_state);
                 tokio::spawn(async move {
@@ -515,6 +602,7 @@ pub async fn listen_and_accept(config: ServerConfig) -> AnyhowResult<()> {
                             _ => error!("Error handling client {}: {}", addr, e),
                         }
                     }
+                    decrement_connection_metrics();
                 });
             }
             Err(e) => {

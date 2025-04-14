@@ -59,7 +59,7 @@ pub struct Cli {
     /// Username for the client (for the client, not used by the server).
     #[arg(short, long)]
     pub username: Option<String>,
-    
+
     /// Hostname or IP address for the admin interface (default: localhost).
     #[arg(long, default_value = "localhost")]
     pub admin_hostname: String,
@@ -67,6 +67,14 @@ pub struct Cli {
     /// Port number for the admin interface (default: 11112).
     #[arg(long, default_value_t = 11112)]
     pub admin_port: u16,
+
+    /// Hostname or IP address for the metrics interface (default: localhost).
+    #[arg(long, default_value = "localhost")]
+    pub metrics_hostname: String,
+
+    /// Port number for the metrics interface (default: 11113).
+    #[arg(long, default_value_t = 11113)]
+    pub metrics_port: u16,
 }
 
 /// Represents the types of messages exchanged between the client and server.

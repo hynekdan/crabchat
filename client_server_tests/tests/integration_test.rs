@@ -1,9 +1,9 @@
 use client::run_client;
+use server::ServerConfig;
 use server::listen_and_accept;
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use utils::MessageType;
-use server::ServerConfig;
 
 #[tokio::test]
 async fn test_client_server_integration() {
@@ -19,6 +19,8 @@ async fn test_client_server_integration() {
             port,
             admin_hostname: admin_hostname.to_string(),
             admin_port,
+            metrics_hostname: hostname.to_string(),
+            metrics_port: 12347,
         };
 
         let server_future = listen_and_accept(server_config);
