@@ -3,6 +3,7 @@
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use tracing::info;
+use dotenvy::dotenv;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 use utils::Cli;
 
@@ -18,6 +19,7 @@ use utils::Cli;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    dotenv().ok();
     tracing_subscriber::registry()
         .with(fmt::layer())
         .with(EnvFilter::from_default_env())
